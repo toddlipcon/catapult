@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<!--
+Copyright (c) 2013 The Chromium Authors. All rights reserved.
+Use of this source code is governed by a BSD-style license that can be
+found in the LICENSE file.
+-->
+<link rel="stylesheet" href="/tracing/ui/extras/kudu_tracing/common.css">
+<link rel="import" href="/tracing/ui/extras/kudu_config.html">
+<link rel="import" href="/tracing/ui/extras/kudu_tracing/profiling_view.html">
+<script>
+'use strict';
+
+tr.exportTo('tr.ui.e.kudu_tracing', function() {
+  window.profilingView = undefined;  // Made global for debugging purposes only.
+
+  document.addEventListener('DOMContentLoaded', function() {
+    window.profilingView = new tr.ui.e.kudu_tracing.ProfilingView();
+    profilingView.timelineView.globalMode = true;
+    Polymer.dom(document.body).appendChild(profilingView);
+  });
+
+  return {};
+});
+</script>
