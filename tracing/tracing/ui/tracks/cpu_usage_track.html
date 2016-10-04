@@ -51,8 +51,10 @@ tr.exportTo('tr.ui.tracks', function() {
     initialize: function(model, interval) {
       if (interval !== undefined)
         this.interval_ = interval;
-      else
-        this.interval_ = this.DEFAULT_INTERVAL;
+      else {
+        this.interval_ = Math.max(this.DEFAULT_INTERVAL,
+                                  Math.ceil(model.bounds.max / MAX_CPU_TRACK_INTERVAL_COUNT));
+      }
       if (model !== undefined)
         this.cpuUsageSeries_ = this.computeCpuUsage_(model);
       else
