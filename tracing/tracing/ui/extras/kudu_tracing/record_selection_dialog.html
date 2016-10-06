@@ -190,23 +190,6 @@ tr.exportTo('tr.ui.e.kudu_tracing', function() {
   var RecordSelectionDialog = tr.ui.b.define('div');
 
   var DEFAULT_PRESETS = [
-    {title: 'Web developer',
-      categoryFilter: ['blink', 'cc', 'netlog', 'renderer.scheduler',
-        'toplevel', 'v8']},
-    {title: 'Input latency',
-      categoryFilter: ['benchmark', 'input', 'evdev', 'renderer.scheduler',
-        'toplevel']},
-    {title: 'Rendering',
-      categoryFilter: ['blink', 'cc', 'gpu', 'toplevel']},
-    {title: 'Javascript and rendering',
-      categoryFilter: ['blink', 'cc', 'gpu', 'renderer.scheduler', 'v8',
-        'toplevel']},
-    {title: 'Frame Viewer',
-      categoryFilter: ['blink', 'cc', 'gpu', 'renderer.scheduler', 'v8',
-        'toplevel',
-        'disabled-by-default-cc.debug',
-        'disabled-by-default-cc.debug.picture',
-        'disabled-by-default-cc.debug.display_items']},
     {title: 'Manually select settings',
       categoryFilter: []}
   ];
@@ -260,10 +243,6 @@ tr.exportTo('tr.ui.e.kudu_tracing', function() {
           'recordSelectionDialog.tracingRecordMode',
           DEFAULT_RECORD_MODE, RECORDING_MODES);
 
-      this.systemTracingBn_ = tr.ui.b.createCheckBox(
-          undefined, undefined,
-          'recordSelectionDialog.useSystemTracing', DEFAULT_SYSTEM_TRACING,
-          'System tracing');
       this.samplingTracingBn_ = tr.ui.b.createCheckBox(
           undefined, undefined,
           'recordSelectionDialog.useSampling', DEFAULT_SAMPLING_TRACING,
@@ -272,8 +251,6 @@ tr.exportTo('tr.ui.e.kudu_tracing', function() {
           '.tracing-modes');
       Polymer.dom(this.tracingModesContainerEl_).appendChild(
           this.tracingRecordModeSltr_);
-      Polymer.dom(this.tracingModesContainerEl_).appendChild(
-          this.systemTracingBn_);
       Polymer.dom(this.tracingModesContainerEl_).appendChild(
           this.samplingTracingBn_);
 
@@ -303,27 +280,11 @@ tr.exportTo('tr.ui.e.kudu_tracing', function() {
       this.addEventListener('visible-change', this.onVisibleChange_.bind(this));
     },
 
-    set supportsSystemTracing(s) {
-      if (s) {
-        this.systemTracingBn_.style.display = undefined;
-      } else {
-        this.systemTracingBn_.style.display = 'none';
-        this.useSystemTracing = false;
-      }
-    },
-
     get tracingRecordMode() {
       return this.tracingRecordModeSltr_.selectedValue;
     },
     set tracingRecordMode(value) {
       this.tracingRecordMode_ = value;
-    },
-
-    get useSystemTracing() {
-      return this.systemTracingBn_.checked;
-    },
-    set useSystemTracing(value) {
-      this.systemTracingBn_.checked = !!value;
     },
 
     get useSampling() {
