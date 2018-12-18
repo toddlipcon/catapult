@@ -9,8 +9,8 @@ import webapp2
 import webtest
 
 from dashboard import debug_alert
-from dashboard import testing_common
-from dashboard import utils
+from dashboard.common import testing_common
+from dashboard.common import utils
 from dashboard.models import anomaly
 from dashboard.models import anomaly_config
 from dashboard.models import graph_data
@@ -97,7 +97,10 @@ class DebugAlertTest(testing_common.TestCase):
     test_key = self._AddSampleData()
     # Add a config which applies to the test. The test is updated upon put.
     self._AddAnomalyConfig('X', test_key, {'min_absolute_change': 10})
-    test_key.get().put()
+    t = test_key.get()
+    t.UpdateSheriff()
+    t.put()
+
     response = self.testapp.get(
         '/debug_alert?test_path=%s' % utils.TestPath(test_key))
     # The custom config should be used when simulating alert processing.

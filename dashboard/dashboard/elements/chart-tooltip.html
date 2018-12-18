@@ -10,6 +10,8 @@ on a point on a graph. It shows more detailed information about the point that
 was just clicked.
 -->
 
+<link rel="import" href="/components/iron-icon/iron-icon.html">
+<link rel="import" href="/components/iron-icons/iron-icons.html">
 <link rel="import" href="/components/paper-card/paper-card.html">
 
 <link rel="import" href="/dashboard/elements/alert-remove-box.html">
@@ -31,6 +33,18 @@ was just clicked.
       padding: 15px;
       overflow-y: auto;
       max-height: 250px;
+    }
+
+    #close-button {
+      float: right;
+    }
+
+    iron-icon: {
+      color: black;
+    }
+
+    iron-icon:active {
+      color: #f09300;
     }
   </style>
 
@@ -104,8 +118,11 @@ was just clicked.
           </div>
 
           <div>
+            <span class="annotation-link"><a href="/group_report?rev={{pointId}}" target="_blank">See all performance changes at {{pointId}}</a></span><br /><br />
             <template is="dom-repeat" items={{links}}>
-              <span class="annotation-link"><a href="{{item.url}}" target="_blank">{{item.text}}</a></span><br />
+              <span class="annotation-link"><a href="{{item.url}}" target="_blank">{{item.text}}</a>
+              <iron-icon icon="content-copy" title="Copy link" on-click="onCopyToClipboard"></iron-icon>
+              </span><br />
             </template>
           </div>
         </div>
@@ -113,10 +130,12 @@ was just clicked.
         <div class="card-actions">
           <bisect-button dialog-confirm xsrf-token="{{xsrfToken}}"
                          bug-id="{{bugId}}"
-                         bisect-info="{{bisectInfo}}"></bisect-button>
+                         bisect-info="{{bisectInfo}}"
+                         alerts="[[alerts]]"></bisect-button>
           <trace-button dialog-confirm xsrf-token="{{xsrfToken}}"
                         bug-id="{{bugId}}"
                         trace-info="{{bisectInfo}}"></trace-button>
+          <paper-button id="close-button" raised dismissive on-click="close">Close</paper-button>
         </div>
 
       </paper-card>
@@ -147,7 +166,7 @@ was just clicked.
         pointId: { notify: true },
         revisions: {
           type: Array,
-          value: function() {
+          value() {
             return [];
           },
           notify: true
@@ -166,9 +185,9 @@ was just clicked.
         xsrfToken: { notify: true }
       },
 
-      testPathChanged: function() {
+      testPathChanged() {
         if (this.testPath) {
-          var parts = this.testPath.split('/');
+          const parts = this.testPath.split('/');
           this.seriesName = parts.pop();
           this.parentPath = parts.join('/');
         }
@@ -177,10 +196,33 @@ was just clicked.
       /**
        * Shows the CL descriptions for the given revision range.
        */
-      onRevisionRangeClick: function(event, detail) {
+      onRevisionRangeClick(event, detail) {
         window.open(
             event.currentTarget.href, 'changelog', 'width=1000,height=1000');
         event.preventDefault();
+      },
+
+      copyTextToClipboard(text) {
+        const textArea = document.createElement('textarea');
+        textArea.value = text;
+        document.body.appendChild(textArea);
+        textArea.select();
+        let successful = false;
+        try {
+          successful = document.execCommand('copy');
+        } catch (e) {
+          successful = false;
+        }
+        document.body.removeChild(textArea);
+        return successful;
+      },
+
+      onCopyToClipboard(event) {
+        const link = event.model.item.url;
+        const success = this.copyTextToClipboard(link);
+        if (!success) {
+          window.prompt('Could not copy automatically, select and copy', link);
+        }
       },
 
       /**
@@ -188,7 +230,7 @@ was just clicked.
        * This method is called whenever the value of this.alerts changes,
        * e.g. by chart-container when an alert is triaged.
        */
-      alertsChanged: function() {
+      alertsChanged() {
         // The triage-dialog should be shown when there is some non-triaged
         // alert, and hidden otherwise.
         if (this.alerts && this.alerts.length) {
@@ -201,35 +243,36 @@ was just clicked.
       /**
        * Fires a 'triaged' event, which should be caught in chart-container.
        */
-      onUntriaged: function(event, detail) {
+      onUntriaged(event, detail) {
         this.fire('triaged', {
           'alerts': this.triagedAlerts,
           'bugid': null
         });
       },
 
-      open: function() {
-        var old_left = this.$.container.offsetLeft;
-        var old_top = this.$.container.offsetTop;
-        openAtPosition(old_top, old_left);
+      open() {
+        const oldLeft = this.$.container.offsetLeft;
+        const oldTop = this.$.container.offsetTop;
+        openAtPosition(oldTop, oldLeft);
       },
 
-      close: function() {
-        if (this.$.container.opened)
+      close() {
+        if (this.$.container.opened) {
           this.$.container.close();
+        }
       },
 
-      openAtPosition: function(top, left) {
+      openAtPosition(top, left) {
         this.$.container.updatePositionFromCoords(top, left);
         if (!this.$.container.opened) {
           this.$.container.open();
         }
       },
 
-      bugNotInvalid: function(bugId) {
+      bugNotInvalid(bugId) {
         return bugId != -1;
       },
-      bugNotIgnored: function(bugId) {
+      bugNotIgnored(bugId) {
         return bugId != -2;
       }
     });

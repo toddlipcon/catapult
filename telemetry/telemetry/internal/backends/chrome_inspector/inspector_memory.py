@@ -32,12 +32,12 @@ class InspectorMemory(object):
       and "jsEventListeners".
     Raises:
       InspectorMemoryException
-      websocket.WebSocketException
+      inspector_websocket.WebSocketException
       socket.error
       exceptions.WebSocketDisconnected
     """
     res = self._inspector_websocket.SyncRequest({
-      'method': 'Memory.getDOMCounters'
+        'method': 'Memory.getDOMCounters'
     }, timeout)
     if ('result' not in res or
         'nodes' not in res['result'] or
@@ -51,3 +51,15 @@ class InspectorMemory(object):
         'documents': res['result']['documents'],
         'jsEventListeners': res['result']['jsEventListeners']
     }
+
+  def PrepareForLeakDetection(self, timeout):
+    """Prepares for Leak Detection by terminating workers, stopping
+       spellcheckers, running garbage collections etc.
+
+    Args:
+      timeout: The number of seconds to wait for the inspector backend to
+          service the request before timing out.
+    """
+    self._inspector_websocket.SyncRequest({
+        'method': 'Memory.prepareForLeakDetection'
+    }, timeout)

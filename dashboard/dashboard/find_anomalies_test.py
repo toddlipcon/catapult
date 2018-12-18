@@ -7,13 +7,17 @@ import unittest
 
 import mock
 
+from google.appengine.ext import ndb
+
 from dashboard import find_anomalies
 from dashboard import find_change_points
-from dashboard import testing_common
-from dashboard import utils
+from dashboard.common import testing_common
+from dashboard.common import utils
 from dashboard.models import anomaly
 from dashboard.models import graph_data
+from dashboard.models import histogram
 from dashboard.models import sheriff
+from tracing.value.diagnostics import reserved_infos
 
 # Sample time series.
 _TEST_ROW_DATA = [
@@ -91,13 +95,18 @@ class ModelMatcher(object):
     return '<IsModel %s>' % self._name
 
 
+@ndb.tasklet
+def _MockTasklet(*_):
+  raise ndb.Return(None)
+
+
 class ProcessAlertsTest(testing_common.TestCase):
 
   def setUp(self):
     super(ProcessAlertsTest, self).setUp()
     self.SetCurrentUser('foo@bar.com', is_admin=True)
 
-  def _AddDataForTests(self):
+  def _AddDataForTests(self, stats=None):
     testing_common.AddTests(
         ['ChromiumGPU'],
         ['linux-release'], {
@@ -107,12 +116,20 @@ class ProcessAlertsTest(testing_common.TestCase):
         })
     ref = utils.TestKey(
         'ChromiumGPU/linux-release/scrolling_benchmark/ref').get()
+    ref.units = 'ms'
     for i in range(9000, 10070, 5):
       # Internal-only data should be found.
       test_container_key = utils.GetTestContainerKey(ref.key)
-      graph_data.Row(
+      r = graph_data.Row(
           id=i + 1, value=float(i * 3),
-          parent=test_container_key, internal_only=True).put()
+          parent=test_container_key, internal_only=True)
+      if stats:
+        for s in stats:
+          setattr(r, s, i)
+      r.put()
+
+  def _DataSeries(self):
+    return [(r.revision, r, r.value) for r in list(graph_data.Row.query())]
 
   @mock.patch.object(
       find_anomalies.find_change_points, 'FindChangePoints',
@@ -128,9 +145,11 @@ class ProcessAlertsTest(testing_common.TestCase):
     test = utils.TestKey(test_path).get()
     sheriff.Sheriff(
         email='a@google.com', id='sheriff', patterns=[test_path]).put()
+    test.UpdateSheriff()
     test.put()
 
-    find_anomalies.ProcessTest(test.key)
+    find_anomalies.ProcessTests([test.key])
+    self.ExecuteDeferredTasks('default')
 
     expected_calls = [
         mock.call(ModelMatcher('sheriff'),
@@ -152,7 +171,8 @@ class ProcessAlertsTest(testing_common.TestCase):
 
     def AnomalyExists(
         anomalies, test, percent_changed, direction,
-        start_revision, end_revision, sheriff_name, internal_only):
+        start_revision, end_revision, sheriff_name, internal_only, units,
+        absolute_delta, statistic):
       for a in anomalies:
         if (a.test == test and
             a.percent_changed == percent_changed and
@@ -160,7 +180,10 @@ class ProcessAlertsTest(testing_common.TestCase):
             a.start_revision == start_revision and
             a.end_revision == end_revision and
             a.sheriff.string_id() == sheriff_name and
-            a.internal_only == internal_only):
+            a.internal_only == internal_only and
+            a.units == units and
+            a.absolute_delta == absolute_delta and
+            a.statistic == statistic):
           return True
       return False
 
@@ -168,26 +191,95 @@ class ProcessAlertsTest(testing_common.TestCase):
         AnomalyExists(
             anomalies, test.key, percent_changed=100, direction=anomaly.UP,
             start_revision=10007, end_revision=10011, sheriff_name='sheriff',
-            internal_only=False))
+            internal_only=False, units='ms', absolute_delta=50,
+            statistic='avg'))
 
     self.assertTrue(
         AnomalyExists(
             anomalies, test.key, percent_changed=-50, direction=anomaly.DOWN,
             start_revision=10037, end_revision=10041, sheriff_name='sheriff',
-            internal_only=False))
+            internal_only=False, units='ms', absolute_delta=-100,
+            statistic='avg'))
 
     self.assertTrue(
         AnomalyExists(
             anomalies, test.key, percent_changed=sys.float_info.max,
             direction=anomaly.UP, start_revision=10057, end_revision=10061,
-            sheriff_name='sheriff', internal_only=False))
+            sheriff_name='sheriff', internal_only=False, units='ms',
+            absolute_delta=100, statistic='avg'))
 
     # This is here just to verify that AnomalyExists returns False sometimes.
     self.assertFalse(
         AnomalyExists(
             anomalies, test.key, percent_changed=100, direction=anomaly.DOWN,
             start_revision=10037, end_revision=10041, sheriff_name='sheriff',
-            internal_only=False))
+            internal_only=False, units='ms', absolute_delta=500,
+            statistic='avg'))
+
+  @mock.patch.object(
+      find_anomalies, '_ProcesssTestStat')
+  def testProcessTest_UsesLastAlert_Avg(self, mock_process_stat):
+    mock_process_stat.side_effect = _MockTasklet
+
+    self._AddDataForTests()
+    test_path = 'ChromiumGPU/linux-release/scrolling_benchmark/ref'
+    test = utils.TestKey(test_path).get()
+
+    a = anomaly.Anomaly(
+        test=test.key, start_revision=10061, end_revision=10062,
+        statistic='avg')
+    a.put()
+
+    sheriff.Sheriff(
+        email='a@google.com', id='sheriff', patterns=[test_path]).put()
+    test.UpdateSheriff()
+    test.put()
+
+    find_anomalies.ProcessTests([test.key])
+    self.ExecuteDeferredTasks('default')
+
+    query = graph_data.Row.query(projection=['revision', 'value'])
+    query = query.filter(graph_data.Row.revision > 10062)
+    query = query.filter(
+        graph_data.Row.parent_test == utils.OldStyleTestKey(test.key))
+    row_data = query.fetch()
+    rows = [(r.revision, r, r.value) for r in row_data]
+    mock_process_stat.assert_called_with(
+        mock.ANY, mock.ANY, mock.ANY, mock.ANY, rows, None)
+
+    anomalies = anomaly.Anomaly.query().fetch()
+    self.assertEqual(len(anomalies), 1)
+
+  @mock.patch.object(
+      find_anomalies, '_ProcesssTestStat')
+  def testProcessTest_SkipsLastAlert_NotAvg(self, mock_process_stat):
+    self._AddDataForTests(stats=('count',))
+    test_path = 'ChromiumGPU/linux-release/scrolling_benchmark/ref'
+    test = utils.TestKey(test_path).get()
+
+    a = anomaly.Anomaly(
+        test=test.key, start_revision=10061, end_revision=10062,
+        statistic='count')
+    a.put()
+
+    sheriff.Sheriff(
+        email='a@google.com', id='sheriff', patterns=[test_path]).put()
+    test.UpdateSheriff()
+    test.put()
+
+    @ndb.tasklet
+    def _AssertParams(
+        config, sheriff_entity, test_entity, stat, rows, ref_rows):
+      del config
+      del sheriff_entity
+      del test_entity
+      del stat
+      del ref_rows
+      assert rows[0][0] < a.end_revision
+
+    mock_process_stat.side_effect = _AssertParams
+    find_anomalies.ProcessTests([test.key])
+    self.ExecuteDeferredTasks('default')
 
   @mock.patch.object(
       find_anomalies.find_change_points, 'FindChangePoints',
@@ -201,8 +293,9 @@ class ProcessAlertsTest(testing_common.TestCase):
     sheriff.Sheriff(
         email='a@google.com', id='sheriff', patterns=[test.test_path]).put()
     test.improvement_direction = anomaly.DOWN
+    test.UpdateSheriff()
     test.put()
-    find_anomalies.ProcessTest(test.key)
+    find_anomalies.ProcessTests([test.key])
     anomalies = anomaly.Anomaly.query().fetch()
     self.assertEqual(len(anomalies), 1)
     self.assertTrue(anomalies[0].is_improvement)
@@ -212,7 +305,7 @@ class ProcessAlertsTest(testing_common.TestCase):
     self._AddDataForTests()
     ref = utils.TestKey(
         'ChromiumGPU/linux-release/scrolling_benchmark/ref').get()
-    find_anomalies.ProcessTest(ref.key)
+    find_anomalies.ProcessTests([ref.key])
     mock_logging_error.assert_called_with('No sheriff for %s', ref.key)
 
   @mock.patch.object(
@@ -229,8 +322,10 @@ class ProcessAlertsTest(testing_common.TestCase):
     sheriff.Sheriff(
         email='a@google.com', id='sheriff', patterns=[test.test_path]).put()
     test.improvement_direction = anomaly.UP
+    test.UpdateSheriff()
     test.put()
-    find_anomalies.ProcessTest(test.key)
+    find_anomalies.ProcessTests([test.key])
+    self.ExecuteDeferredTasks('default')
     mock_email_sheriff.assert_called_once_with(
         ModelMatcher('sheriff'),
         ModelMatcher('ChromiumGPU/linux-release/scrolling_benchmark/ref'),
@@ -249,9 +344,11 @@ class ProcessAlertsTest(testing_common.TestCase):
     test.internal_only = True
     sheriff.Sheriff(
         email='a@google.com', id='sheriff', patterns=[test.test_path]).put()
+    test.UpdateSheriff()
     test.put()
 
-    find_anomalies.ProcessTest(test.key)
+    find_anomalies.ProcessTests([test.key])
+    self.ExecuteDeferredTasks('default')
     expected_calls = [
         mock.call(ModelMatcher('sheriff'),
                   ModelMatcher(
@@ -267,6 +364,29 @@ class ProcessAlertsTest(testing_common.TestCase):
     self.assertEqual(10007, anomalies[0].start_revision)
     self.assertEqual(10011, anomalies[0].end_revision)
     self.assertTrue(anomalies[0].internal_only)
+
+  def testProcessTest_CreatesAnAnomaly_RefMovesToo_BenchmarkDuration(self):
+    testing_common.AddTests(
+        ['ChromiumGPU'], ['linux-release'], {
+            'foo': {'benchmark_duration': {'ref': {}}},
+        })
+    ref = utils.TestKey(
+        'ChromiumGPU/linux-release/foo/benchmark_duration/ref').get()
+    non_ref = utils.TestKey(
+        'ChromiumGPU/linux-release/foo/benchmark_duration').get()
+    test_container_key = utils.GetTestContainerKey(ref.key)
+    test_container_key_non_ref = utils.GetTestContainerKey(non_ref.key)
+    for row in _TEST_ROW_DATA:
+      graph_data.Row(id=row[0], value=row[1], parent=test_container_key).put()
+      graph_data.Row(id=row[0], value=row[1],
+                     parent=test_container_key_non_ref).put()
+    sheriff.Sheriff(
+        email='a@google.com', id='sheriff', patterns=[ref.test_path]).put()
+    ref.UpdateSheriff()
+    ref.put()
+    find_anomalies.ProcessTests([ref.key])
+    new_anomalies = anomaly.Anomaly.query().fetch()
+    self.assertEqual(1, len(new_anomalies))
 
   def testProcessTest_AnomaliesMatchRefSeries_NoAlertCreated(self):
     # Tests that a Anomaly entity is not created if both the test and its
@@ -287,9 +407,11 @@ class ProcessAlertsTest(testing_common.TestCase):
                      parent=test_container_key_non_ref).put()
     sheriff.Sheriff(
         email='a@google.com', id='sheriff', patterns=[non_ref.test_path]).put()
+    ref.UpdateSheriff()
     ref.put()
+    non_ref.UpdateSheriff()
     non_ref.put()
-    find_anomalies.ProcessTest(non_ref.key)
+    find_anomalies.ProcessTests([non_ref.key])
     new_anomalies = anomaly.Anomaly.query().fetch()
     self.assertEqual(0, len(new_anomalies))
 
@@ -314,9 +436,11 @@ class ProcessAlertsTest(testing_common.TestCase):
         email='a@google.com', id='sheriff', patterns=[ref.test_path]).put()
     sheriff.Sheriff(
         email='a@google.com', id='sheriff', patterns=[non_ref.test_path]).put()
+    ref.UpdateSheriff()
     ref.put()
+    non_ref.UpdateSheriff()
     non_ref.put()
-    find_anomalies.ProcessTest(non_ref.key)
+    find_anomalies.ProcessTests([non_ref.key])
     new_anomalies = anomaly.Anomaly.query().fetch()
     self.assertEqual(len(new_anomalies), 1)
 
@@ -332,39 +456,151 @@ class ProcessAlertsTest(testing_common.TestCase):
       graph_data.Row(id=row[0], value=row[1], parent=test_container_key).put()
     sheriff.Sheriff(
         email='a@google.com', id='sheriff', patterns=[ref.test_path]).put()
+    ref.UpdateSheriff()
     ref.put()
-    find_anomalies.ProcessTest(ref.key)
+    find_anomalies.ProcessTests([ref.key])
     new_anomalies = anomaly.Anomaly.query().fetch()
     self.assertEqual(1, len(new_anomalies))
     self.assertEqual(anomaly.UP, new_anomalies[0].direction)
     self.assertEqual(241536, new_anomalies[0].start_revision)
     self.assertEqual(241537, new_anomalies[0].end_revision)
 
-  @mock.patch('logging.error')
-  def testProcessTest_LastAlertedRevisionTooHigh_PropertyReset(
-      self, mock_logging_error):
-    # If the last_alerted_revision property of the TestMetadata is too high,
-    # then the property should be reset and an error should be logged.
-    self._AddDataForTests()
-    test = utils.TestKey(
-        'ChromiumGPU/linux-release/scrolling_benchmark/ref').get()
-    test.last_alerted_revision = 1234567890
-    test.put()
-    find_anomalies.ProcessTest(test.key)
-    self.assertIsNone(test.key.get().last_alerted_revision)
-    calls = [
-        mock.call(
-            'last_alerted_revision %d is higher than highest rev %d for test '
-            '%s; setting last_alerted_revision to None.',
-            1234567890,
-            10066,
-            'ChromiumGPU/linux-release/scrolling_benchmark/ref'),
-        mock.call(
-            'No rows fetched for %s',
-            'ChromiumGPU/linux-release/scrolling_benchmark/ref')
-    ]
-    mock_logging_error.assert_has_calls(calls, any_order=True)
+  def testMakeAnomalyEntity_NoRefBuild(self):
+    testing_common.AddTests(
+        ['ChromiumPerf'],
+        ['linux'], {
+            'page_cycler_v2': {
+                'cnn': {},
+                'yahoo': {},
+                'nytimes': {},
+            },
+        })
+    test = utils.TestKey('ChromiumPerf/linux/page_cycler_v2').get()
+    testing_common.AddRows(test.test_path, [100, 200, 300, 400])
 
+    alert = find_anomalies._MakeAnomalyEntity(
+        _MakeSampleChangePoint(10011, 50, 100),
+        test, 'avg',
+        self._DataSeries()).get_result()
+    self.assertIsNone(alert.ref_test)
+
+  def testMakeAnomalyEntity_RefBuildSlash(self):
+    testing_common.AddTests(
+        ['ChromiumPerf'],
+        ['linux'], {
+            'page_cycler_v2': {
+                'ref': {},
+                'cnn': {},
+                'yahoo': {},
+                'nytimes': {},
+            },
+        })
+    test = utils.TestKey('ChromiumPerf/linux/page_cycler_v2').get()
+    testing_common.AddRows(test.test_path, [100, 200, 300, 400])
+
+    alert = find_anomalies._MakeAnomalyEntity(
+        _MakeSampleChangePoint(10011, 50, 100),
+        test, 'avg',
+        self._DataSeries()).get_result()
+    self.assertEqual(alert.ref_test.string_id(),
+                     'ChromiumPerf/linux/page_cycler_v2/ref')
+
+  def testMakeAnomalyEntity_RefBuildUnderscore(self):
+    testing_common.AddTests(
+        ['ChromiumPerf'],
+        ['linux'], {
+            'page_cycler_v2': {
+                'cnn': {},
+                'cnn_ref': {},
+                'yahoo': {},
+                'nytimes': {},
+            },
+        })
+    test = utils.TestKey('ChromiumPerf/linux/page_cycler_v2/cnn').get()
+    testing_common.AddRows(test.test_path, [100, 200, 300, 400])
+
+    alert = find_anomalies._MakeAnomalyEntity(
+        _MakeSampleChangePoint(10011, 50, 100),
+        test, 'avg',
+        self._DataSeries()).get_result()
+    self.assertEqual(alert.ref_test.string_id(),
+                     'ChromiumPerf/linux/page_cycler_v2/cnn_ref')
+    self.assertIsNone(alert.display_start)
+    self.assertIsNone(alert.display_end)
+
+  def testMakeAnomalyEntity_RevisionRanges(self):
+    testing_common.AddTests(
+        ['ClankInternal'],
+        ['linux'], {
+            'page_cycler_v2': {
+                'cnn': {},
+                'cnn_ref': {},
+                'yahoo': {},
+                'nytimes': {},
+            },
+        })
+    test = utils.TestKey('ClankInternal/linux/page_cycler_v2/cnn').get()
+    testing_common.AddRows(test.test_path, [100, 200, 300, 400])
+    for row in graph_data.Row.query():
+      row.r_commit_pos = int(row.value) + 2 # Different enough to ensure it is
+                                            # picked up properly.
+      row.put()
+
+    alert = find_anomalies._MakeAnomalyEntity(
+        _MakeSampleChangePoint(300, 50, 100),
+        test, 'avg',
+        self._DataSeries()).get_result()
+    self.assertEqual(alert.display_start, 203)
+    self.assertEqual(alert.display_end, 302)
+
+  def testMakeAnomalyEntity_AddsOwnership(self):
+    data_samples = [
+        {
+            'type': 'GenericSet',
+            'guid': 'eb212e80-db58-4cbd-b331-c2245ecbb826',
+            'values': ['alice@chromium.org', 'bob@chromium.org']
+        },
+        {
+            'type': 'GenericSet',
+            'guid': 'eb212e80-db58-4cbd-b331-c2245ecbb827',
+            'values': ['abc']
+        }]
+
+    test_key = utils.TestKey('ChromiumPerf/linux/page_cycler_v2/cnn')
+    testing_common.AddTests(
+        ['ChromiumPerf'],
+        ['linux'], {
+            'page_cycler_v2': {
+                'cnn': {},
+                'cnn_ref': {},
+                'yahoo': {},
+                'nytimes': {},
+            },
+        })
+    test = test_key.get()
+    testing_common.AddRows(test.test_path, [100, 200, 300, 400])
+
+    suite_key = utils.TestKey('ChromiumPerf/linux/page_cycler_v2')
+    entity = histogram.SparseDiagnostic(
+        data=data_samples[0], test=suite_key, start_revision=1,
+        end_revision=sys.maxint, id=data_samples[0]['guid'],
+        name=reserved_infos.OWNERS.name)
+    entity.put()
+
+    entity = histogram.SparseDiagnostic(
+        data=data_samples[1], test=suite_key, start_revision=1,
+        end_revision=sys.maxint, id=data_samples[1]['guid'],
+        name=reserved_infos.BUG_COMPONENTS.name)
+    entity.put()
+
+    alert = find_anomalies._MakeAnomalyEntity(
+        _MakeSampleChangePoint(10011, 50, 100),
+        test, 'avg',
+        self._DataSeries()).get_result()
+
+    self.assertEqual(alert.ownership['component'], 'abc')
+    self.assertListEqual(alert.ownership['emails'],
+                         ['alice@chromium.org', 'bob@chromium.org'])
 
 if __name__ == '__main__':
   unittest.main()

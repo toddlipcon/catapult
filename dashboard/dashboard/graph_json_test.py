@@ -12,8 +12,9 @@ import webtest
 from google.appengine.ext import ndb
 
 from dashboard import graph_json
-from dashboard import testing_common
-from dashboard import utils
+from dashboard import list_tests
+from dashboard.common import testing_common
+from dashboard.common import utils
 from dashboard.models import anomaly
 from dashboard.models import graph_data
 
@@ -52,12 +53,15 @@ class GraphJsonTest(testing_common.TestCase):
       bot.put()
       bots.append(bot)
       test = graph_data.TestMetadata(id='ChromiumGPU/%s/dromaeo' % name)
+      test.UpdateSheriff()
       test.put()
       for sub_name in ['dom', 'jslib']:
         sub_test = graph_data.TestMetadata(
             id='%s/%s' % (test.key.id(), sub_name),
             improvement_direction=anomaly.UP,
-            has_rows=True).put()
+            has_rows=True)
+        sub_test.UpdateSheriff()
+        sub_test.put()
         test_container_key = utils.GetTestContainerKey(sub_test)
         for i in range(start_rev, end_rev, step):
           # Add Rows for one bot with revision numbers that aren't lined up
@@ -67,8 +71,7 @@ class GraphJsonTest(testing_common.TestCase):
               parent=test_container_key, id=rev, value=float(i * 2),
               r_webkit=int(i * 0.25), a_str='some_string',
               buildnumber=i - start_rev,
-              a_tracing_uri='http://trace/%d' % i,
-              a_trace_rerun_options={'foo': '--foo'})
+              a_tracing_uri='http://trace/%d' % i)
           rows.append(row)
     ndb.put_multi(rows)
 
@@ -85,6 +88,7 @@ class GraphJsonTest(testing_common.TestCase):
     bot = graph_data.Bot(id='bot', parent=master.key)
     bot.put()
     test = graph_data.TestMetadata(id='master/bot/suite')
+    test.UpdateSheriff()
     test.put()
 
     rows = []
@@ -94,6 +98,7 @@ class GraphJsonTest(testing_common.TestCase):
       test = graph_data.TestMetadata(id=path,
                                      improvement_direction=anomaly.UP,
                                      has_rows=True)
+      test.UpdateSheriff()
       test.put()
       test_container_key = utils.GetTestContainerKey(test.key)
       for i in range(start_rev, end_rev, step):
@@ -101,8 +106,7 @@ class GraphJsonTest(testing_common.TestCase):
             parent=test_container_key, id=i, value=float(i * 2),
             r_webkit=int(i * 0.25), a_str='some_string',
             buildnumber=i - start_rev,
-            a_tracing_uri='http://trace/%d' % i,
-            a_trace_rerun_options={'foo': '--foo'})
+            a_tracing_uri='http://trace/%d' % i)
         rows.append(row)
     ndb.put_multi(rows)
 
@@ -167,6 +171,27 @@ class GraphJsonTest(testing_common.TestCase):
     flot_json_str = response.body
     self.CheckFlotJson(flot_json_str, 150, 2, 15850, 16000, step=1)
     self.assertEqual('*', response.headers.get('Access-Control-Allow-Origin'))
+
+  def testPost_NanFiltered(self):
+    self._AddTestColumns(start_rev=15700, end_rev=16000, step=1)
+
+    test_key = utils.OldStyleTestKey('ChromiumGPU/win7/dromaeo/jslib')
+    row_key = utils.GetRowKey(test_key, 15900)
+    row = row_key.get()
+    row.value = float('nan')
+    row.put()
+
+    graphs = {
+        'test_path_dict': {
+            'ChromiumGPU/win7/dromaeo/jslib': [],
+        }
+    }
+    # If the request is valid, a valid response will be returned.
+    response = self.testapp.post(
+        '/graph_json', {'graphs': json.dumps(graphs)})
+    flot_json_str = response.body
+    rows = json.loads(flot_json_str)['data']['0']['data']
+    self.assertEqual(149, len(rows))
 
   def testPost_InvalidRequest_ReportsError(self):
     self.testapp.post('/graph_json', {}, status=500)
@@ -526,6 +551,7 @@ class GraphJsonTest(testing_common.TestCase):
     test.description = 'About this test'
     test.units = 'ms'
     test.buildername = 'Windows 7 (1)'
+    test.UpdateSheriff()
     test.put()
 
     flot_json_str = graph_json.GetGraphJson(
@@ -565,10 +591,6 @@ class GraphJsonTest(testing_common.TestCase):
                      annotations['0']['0']['a_tracing_uri'])
     self.assertEqual('http://trace/15012',
                      annotations['0']['4']['a_tracing_uri'])
-
-    # Verify the tracing rerun options
-    self.assertEqual({'foo': '--foo'},
-                     annotations['0']['0']['a_trace_rerun_options'])
 
     # Verify the series annotations.
     self.assertEqual({
@@ -647,7 +669,10 @@ class GraphJsonTest(testing_common.TestCase):
     for name in ['sub_test_a', 'sub_test_b']:
       sub_test = graph_data.TestMetadata(id='%s/%s' % (test_key.id(), name),
                                          improvement_direction=anomaly.UP,
-                                         has_rows=True).put()
+                                         has_rows=True)
+      sub_test.UpdateSheriff()
+      sub_test.put()
+
       sub_test_container_key = utils.GetTestContainerKey(sub_test)
       for i in range(start_rev, end_rev, 3):
         # Add Rows for one bot with revision numbers that aren't lined up
@@ -656,16 +681,16 @@ class GraphJsonTest(testing_common.TestCase):
             parent=sub_test_container_key, id=i, value=float(i * 2),
             r_webkit=int(i * 0.25), a_str='some_string',
             buildnumber=i - start_rev,
-            a_tracing_uri='http://trace/%d' % i,
-            a_trace_rerun_options={'foo': '--foo'})
+            a_tracing_uri='http://trace/%d' % i)
         rows.append(row)
     ndb.put_multi(rows)
 
-    flot_json_str = graph_json.GetGraphJson(
+    paths = list_tests.GetTestsForTestPathDict(
         {
             'ChromiumGPU/win7/dromaeo/jslib': ['jslib'],
-        },
-        rev=15000, num_points=8, is_selected=False)
+        }, False)['tests']
+    flot_json_str = graph_json.GetGraphJson(
+        paths, rev=15000, num_points=8, is_selected=False)
     flot = json.loads(flot_json_str)
 
     sub_test_a_index = self._GetSeriesIndex(
@@ -685,8 +710,9 @@ class GraphJsonTest(testing_common.TestCase):
     test_paths = ['M/b/suite/%s' % i for i in range(100)]
     for p in test_paths:
       testing_common.AddRows(p, [1])
-    response = graph_json.GetGraphJson(
-        test_path_dict={p: [] for p in test_paths}, is_selected=False)
+    path_list = list_tests.GetTestsForTestPathDict(
+        {p: [] for p in test_paths}, False)['tests']
+    response = graph_json.GetGraphJson(path_list, is_selected=False)
     self.assertEqual(
         {'data': {}, 'annotations': {}, 'error_bars': {}},
         json.loads(response))
@@ -715,52 +741,80 @@ class GraphJsonParseRequestArgumentsTest(testing_common.TestCase):
     # unspecified arguments get set to None.
     handler = self._HandlerWithMockRequestParams(rev='12345', num_points='123')
     expected = {
-        'test_path_dict': {
-            'Master/b1/scrolling/frame_times/about.com': [],
-            'Master/b2/scrolling/frame_times/about.com': [],
-            'Master/linux/dromaeo.domcoremodify/dom': [],
-        },
+        'test_paths': [
+            'Master/b1/scrolling/frame_times/about.com',
+            'Master/b2/scrolling/frame_times/about.com',
+            'Master/linux/dromaeo.domcoremodify/dom'
+        ],
         'rev': 12345,
         'num_points': 123,
         'start_rev': None,
         'end_rev': None,
         'is_selected': None,
     }
-    self.assertEqual(expected, handler._ParseRequestArguments())
+    actual = handler._ParseRequestArguments()
+    actual['test_paths'].sort()
+    self.assertEqual(expected, actual)
+
+  def testParseRequestArguments_TestPathListSpecified(self):
+    handler = self._HandlerWithMockRequestParams(
+        test_path_dict=None, test_path_list=[
+            'Master/b1/scrolling/frame_times/about.com',
+            'Master/b2/scrolling/frame_times/about.com',
+            'Master/linux/dromaeo.domcoremodify/dom'])
+
+    expected = {
+        'test_paths': [
+            'Master/b1/scrolling/frame_times/about.com',
+            'Master/b2/scrolling/frame_times/about.com',
+            'Master/linux/dromaeo.domcoremodify/dom'
+        ],
+        'rev': None,
+        'num_points': 150,
+        'start_rev': None,
+        'end_rev': None,
+        'is_selected': None,
+    }
+    actual = handler._ParseRequestArguments()
+    self.assertEqual(expected, actual)
 
   def testParseRequestArguments_OnlyTestPathDictSpecified(self):
     # No revision or number of points is specified, so they're set to None.
     handler = self._HandlerWithMockRequestParams()
     expected = {
-        'test_path_dict': {
-            'Master/b1/scrolling/frame_times/about.com': [],
-            'Master/b2/scrolling/frame_times/about.com': [],
-            'Master/linux/dromaeo.domcoremodify/dom': [],
-        },
+        'test_paths': [
+            'Master/b1/scrolling/frame_times/about.com',
+            'Master/b2/scrolling/frame_times/about.com',
+            'Master/linux/dromaeo.domcoremodify/dom',
+        ],
         'rev': None,
         'num_points': graph_json._DEFAULT_NUM_POINTS,
         'start_rev': None,
         'end_rev': None,
         'is_selected': None,
     }
-    self.assertEqual(expected, handler._ParseRequestArguments())
+    actual = handler._ParseRequestArguments()
+    actual['test_paths'].sort()
+    self.assertEqual(expected, actual)
 
   def testParseRequestArguments_NegativeRevision(self):
     # Negative revision is invalid; it's the same as no revision.
     handler = self._HandlerWithMockRequestParams(rev='-1')
     expected = {
-        'test_path_dict': {
-            'Master/b1/scrolling/frame_times/about.com': [],
-            'Master/b2/scrolling/frame_times/about.com': [],
-            'Master/linux/dromaeo.domcoremodify/dom': [],
-        },
+        'test_paths': [
+            'Master/b1/scrolling/frame_times/about.com',
+            'Master/b2/scrolling/frame_times/about.com',
+            'Master/linux/dromaeo.domcoremodify/dom',
+        ],
         'rev': None,
         'num_points': graph_json._DEFAULT_NUM_POINTS,
         'start_rev': None,
         'end_rev': None,
         'is_selected': None,
     }
-    self.assertEqual(expected, handler._ParseRequestArguments())
+    actual = handler._ParseRequestArguments()
+    actual['test_paths'].sort()
+    self.assertEqual(expected, actual)
 
 
 class GraphJsonHelperFunctionTest(testing_common.TestCase):
@@ -771,11 +825,47 @@ class GraphJsonHelperFunctionTest(testing_common.TestCase):
     test.buildername = 'MyBuilder'
     test_container_key = utils.GetTestContainerKey(test)
     row = graph_data.Row(id=345, buildnumber=456, parent=test_container_key)
-    row.a_stdio_uri = ('[Build stdio](http://build.chromium.org/p/my.master.id/'
-                       'builders/MyBuilder/builds/456/steps/my_suite/logs/'
-                       'stdio)')
+    # Test buildbot format
+    row.a_stdio_uri = ('[Buildbot stdio]('
+                       'http://build.chromium.org/p/my.master.id/'
+                       'builders/MyBuilder%20%281%29/builds/456/steps/'
+                       'my_suite/logs/stdio)')
+    point_info = graph_json._PointInfoDict(row, {})
+    self.assertEqual(
+        '[Buildbot stdio](https://luci-logdog.appspot.com/v/?s='
+        'chrome%2Fbb%2Fmy.master.id%2FMyBuilder__1_%2F456%2F%2B%2F'
+        'recipes%2Fsteps%2Fmy_suite%2F0%2Fstdout)', point_info['a_stdio_uri'])
+    self.assertEqual(
+        '[Buildbot status page](http://build.chromium.org/p/my.master.id/'
+        'builders/MyBuilder%20%281%29/builds/456)',
+        point_info['a_buildbot_status_page'])
+
+    # Test non-buildbot format
+    row.a_stdio_uri = '[Buildbot stdio](http://unkonwn/type)'
     point_info = graph_json._PointInfoDict(row, {})
     self.assertEqual(row.a_stdio_uri, point_info['a_stdio_uri'])
+    self.assertIsNone(point_info.get('a_buildbot_status_page'))
+
+  def testPointInfoDict_BuildUri_NoBuildbotUri(self):
+    testing_common.AddTests(['Master'], ['b'], {'my_suite': {}})
+    test = utils.TestKey('Master/b/my_suite').get()
+    test.buildername = 'MyBuilder'
+    test_container_key = utils.GetTestContainerKey(test)
+    row = graph_data.Row(id=345, buildnumber=456, parent=test_container_key)
+    # Test buildbot format
+    row.a_stdio_uri = ('[Buildbot stdio]('
+                       'http://build.chromium.org/p/my.master.id/'
+                       'builders/MyBuilder%20%281%29/builds/456/steps/'
+                       'my_suite/logs/stdio)')
+    row.a_build_uri = ('[Build]('
+                       'http://foo/bar)')
+    point_info = graph_json._PointInfoDict(row, {})
+    self.assertEqual(
+        '[Buildbot stdio](https://luci-logdog.appspot.com/v/?s='
+        'chrome%2Fbb%2Fmy.master.id%2FMyBuilder__1_%2F456%2F%2B%2F'
+        'recipes%2Fsteps%2Fmy_suite%2F0%2Fstdout)', point_info['a_stdio_uri'])
+    self.assertIsNone(point_info.get('a_buildbot_status_page'))
+    self.assertEqual(row.a_build_uri, point_info['a_build_uri'])
 
   def testPointInfoDict_RowHasNoTracingUri_ResultHasNoTracingUri(self):
     testing_common.AddTests(['Master'], ['b'], {'my_suite': {}})

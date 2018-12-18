@@ -16,10 +16,9 @@ import logging
 
 from google.appengine.ext import ndb
 
-from dashboard import bisect_stats
-from dashboard import buildbucket_service
 from dashboard.models import bug_data
 from dashboard.models import internal_only_model
+from dashboard.services import buildbucket_service
 
 
 class TryJob(internal_only_model.InternalOnlyModel):
@@ -47,9 +46,6 @@ class TryJob(internal_only_model.InternalOnlyModel):
       ],
       indexed=True)
 
-  # Number of times this job has been tried.
-  run_count = ndb.IntegerProperty(default=0)
-
   # Last time this job was started.
   last_ran_timestamp = ndb.DateTimeProperty()
 
@@ -70,7 +66,6 @@ class TryJob(internal_only_model.InternalOnlyModel):
 
   def SetStarted(self):
     self.status = 'started'
-    self.run_count += 1
     self.last_ran_timestamp = datetime.datetime.now()
     self.put()
     if self.bug_id:
@@ -81,7 +76,6 @@ class TryJob(internal_only_model.InternalOnlyModel):
     self.put()
     if self.bug_id:
       bug_data.SetBisectStatus(self.bug_id, 'failed')
-    bisect_stats.UpdateBisectStats(self.bot, 'failed')
 
   def SetStaled(self):
     self.status = 'staled'
@@ -89,10 +83,8 @@ class TryJob(internal_only_model.InternalOnlyModel):
     logging.info('Updated status to staled')
     # TODO(sullivan, dtu): what is the purpose of 'staled' status? Doesn't it
     # just prevent updating jobs older than 24 hours???
-    # TODO(chrisphan): Add 'staled' state to bug_data and bisect_stats.
     if self.bug_id:
       bug_data.SetBisectStatus(self.bug_id, 'failed')
-    bisect_stats.UpdateBisectStats(self.bot, 'failed')
 
   def SetCompleted(self):
     logging.info('Updated status to completed')
@@ -100,7 +92,13 @@ class TryJob(internal_only_model.InternalOnlyModel):
     self.put()
     if self.bug_id:
       bug_data.SetBisectStatus(self.bug_id, 'completed')
-    bisect_stats.UpdateBisectStats(self.bot, 'completed')
+
+  def GetCulpritCL(self):
+    if not self.results_data:
+      return None
+    # culprit_data can be undefined or explicitly set to None
+    culprit_data = self.results_data.get('culprit_data') or {}
+    return culprit_data.get('cl')
 
   def GetConfigDict(self):
     return json.loads(self.config.split('=', 1)[1])
@@ -125,7 +123,6 @@ class TryJob(internal_only_model.InternalOnlyModel):
     # There are various failure and cancellation reasons for a buildbucket
     # job to fail as listed in https://goto.google.com/bb_status.
     job_updates = {
-        'status': 'failed',
         'failure_reason': (data.get('cancelation_reason') or
                            data.get('failure_reason')),
         'buildbot_log_url': data.get('url')

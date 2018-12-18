@@ -2,28 +2,23 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import datetime
-import json
 import logging
 import os
-import random
 import shutil
-import subprocess
 import sys
 import tempfile
 
 from py_utils import cloud_storage  # pylint: disable=import-error
 
 from telemetry.internal.util import file_handle
-from telemetry.timeline import trace_data as trace_data_module
 from telemetry import value as value_module
-
-_TRACE2HTML_PATH = os.path.join(os.path.dirname(__file__), '..', '..', '..',
-                                'tracing', 'bin', 'trace2html')
+from tracing.trace_data import trace_data as trace_data_module
 
 
 class TraceValue(value_module.Value):
-  def __init__(self, page, trace_data, important=False, description=None):
+  def __init__(self, page, trace_data, important=False, description=None,
+               file_path=None, remote_path=None, upload_bucket=None,
+               cloud_url=None):
     """A value that contains a TraceData object and knows how to
     output it.
 
@@ -35,7 +30,10 @@ class TraceValue(value_module.Value):
         page, name='trace', units='', important=important,
         description=description, tir_label=None, grouping_keys=None)
     self._temp_file = self._GetTempFileHandle(trace_data)
-    self._cloud_url = None
+    self._file_path = file_path
+    self._remote_path = remote_path
+    self._upload_bucket = upload_bucket
+    self._cloud_url = cloud_url
     self._serialized_file_handle = None
 
   @property
@@ -46,50 +44,22 @@ class TraceValue(value_module.Value):
       return self._serialized_file_handle.GetAbsPath()
 
   def _GetTraceParts(self, trace_data):
-    return [(trace_data.GetTraceFor(p), p)
+    return [(trace_data.GetTracesFor(p), p)
             for p in trace_data_module.ALL_TRACE_PARTS
-            if trace_data.HasTraceFor(p)]
-
-  @staticmethod
-  def _DumpTraceToFile(trace, path):
-    with open(path, 'w') as fp:
-      if isinstance(trace, basestring):
-        fp.write(trace)
-      elif isinstance(trace, dict) or isinstance(trace, list):
-        json.dump(trace, fp)
-      else:
-        raise TypeError('Trace is of unknown type.')
+            if trace_data.HasTracesFor(p)]
 
   def _GetTempFileHandle(self, trace_data):
-    temp_dir = tempfile.mkdtemp()
-    trace_files = []
-    counter = 0
-    try:
-      for trace, part in self._GetTraceParts(trace_data):
-        file_path = os.path.join(temp_dir, '%s.trace' % counter)
-        self._DumpTraceToFile(trace, file_path)
-        logging.info('Trace (%s) of size %d bytes saved.',
-                     part, os.path.getsize(file_path))
-        trace_files.append(file_path)
-        counter += 1
-      tf = tempfile.NamedTemporaryFile(delete=False, suffix='.html')
-      tf.close()
-      if trace_files:
-        title = ''
-        if self.page:
-          title = self.page.display_name
-        cmd = (['python', _TRACE2HTML_PATH] + trace_files +
-               ['--output', tf.name] + ['--title', title])
-        subprocess.check_output(cmd)
-      else:
-        logging.warning('No traces to convert to html.')
-      return file_handle.FromTempFile(tf)
-    finally:
-      shutil.rmtree(temp_dir)
+    tf = tempfile.NamedTemporaryFile(delete=False, suffix='.html')
+    tf.close()
+    title = ''
+    if self.page:
+      title = self.page.name
+    trace_data.Serialize(tf.name, trace_title=title)
+    return file_handle.FromFilePath(tf.name)
 
   def __repr__(self):
     if self.page:
-      page_name = self.page.display_name
+      page_name = self.page.name
     else:
       page_name = 'None'
     return 'TraceValue(%s, %s)' % (page_name, self.name)
@@ -150,24 +120,22 @@ class TraceValue(value_module.Value):
     d = super(TraceValue, self).AsDict()
     if self._serialized_file_handle:
       d['file_id'] = self._serialized_file_handle.id
+    if self._file_path:
+      d['file_path'] = self._file_path
     if self._cloud_url:
       d['cloud_url'] = self._cloud_url
     return d
 
-  def Serialize(self, dir_path):
+  def Serialize(self):
     if self._temp_file is None:
       raise ValueError('Tried to serialize nonexistent trace.')
-    if self.page:
-      file_name = self.page.file_safe_name
-    else:
-      file_name = ''
-    file_name += str(self._temp_file.id) + self._temp_file.extension
-    file_path = os.path.abspath(os.path.join(dir_path, file_name))
-    shutil.copy(self._temp_file.GetAbsPath(), file_path)
-    self._serialized_file_handle = file_handle.FromFilePath(file_path)
+    if self._file_path is None:
+      raise ValueError('Serialize requires file_path.')
+    shutil.copy(self._temp_file.GetAbsPath(), self._file_path)
+    self._serialized_file_handle = file_handle.FromFilePath(self._file_path)
     return self._serialized_file_handle
 
-  def UploadToCloud(self, bucket):
+  def UploadToCloud(self):
     if self._temp_file is None:
       raise ValueError('Tried to upload nonexistent trace to Cloud Storage.')
     try:
@@ -175,16 +143,11 @@ class TraceValue(value_module.Value):
         fh = self._serialized_file_handle
       else:
         fh = self._temp_file
-      remote_path = ('trace-file-id_%s-%s-%d%s' % (
-          fh.id,
-          datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S'),
-          random.randint(1, 100000),
-          fh.extension))
-      self._cloud_url = cloud_storage.Insert(
-          bucket, remote_path, fh.GetAbsPath())
+      cloud_storage.Insert(
+          self._upload_bucket, self._remote_path, fh.GetAbsPath())
       sys.stderr.write(
-          'View generated trace files online at %s for page %s\n' %
-          (self._cloud_url, self.page.url if self.page else 'unknown'))
+          'View generated trace files online at %s for story %s\n' %
+          (self._cloud_url, self.page.name if self.page else 'unknown'))
       return self._cloud_url
     except cloud_storage.PermissionError as e:
       logging.error('Cannot upload trace files to cloud storage due to '

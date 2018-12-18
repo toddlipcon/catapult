@@ -2,41 +2,42 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import sys
 import unittest
 
-import mock
 import webapp2
 import webtest
 
 from dashboard import alerts
-from dashboard import testing_common
-from dashboard import utils
+from dashboard.common import testing_common
+from dashboard.common import utils
 from dashboard.models import anomaly
 from dashboard.models import bug_data
-from dashboard.models import graph_data
 from dashboard.models import sheriff
-from dashboard.models import stoppage_alert
 
 
 class AlertsTest(testing_common.TestCase):
-
-  # TODO(qyearsley): Simplify this unit test.
 
   def setUp(self):
     super(AlertsTest, self).setUp()
     app = webapp2.WSGIApplication([('/alerts', alerts.AlertsHandler)])
     self.testapp = webtest.TestApp(app)
+    testing_common.SetSheriffDomains(['chromium.org'])
+    testing_common.SetIsInternalUser('internal@chromium.org', True)
+    self.SetCurrentUser('internal@chromium.org', is_admin=True)
 
   def _AddAlertsToDataStore(self):
     """Adds sample data, including triaged and non-triaged alerts."""
     key_map = {}
 
     sheriff_key = sheriff.Sheriff(
-        id='Chromium Perf Sheriff', email='sullivan@google.com').put()
+        id='Chromium Perf Sheriff', email='internal@chromium.org').put()
     testing_common.AddTests(['ChromiumGPU'], ['linux-release'], {
         'scrolling-benchmark': {
             'first_paint': {},
+            'first_paint_ref': {},
             'mean_frame_time': {},
+            'mean_frame_time_ref': {},
         }
     })
     first_paint = utils.TestKey(
@@ -56,10 +57,11 @@ class AlertsTest(testing_common.TestCase):
     # Add some (12) non-triaged alerts.
     for end_rev in range(10000, 10120, 10):
       test_key = first_paint if end_rev % 20 == 0 else mean_frame_time
+      ref_test_key = utils.TestKey('%s_ref' % utils.TestPath(test_key))
       anomaly_entity = anomaly.Anomaly(
           start_revision=end_rev - 5, end_revision=end_rev, test=test_key,
           median_before_anomaly=100, median_after_anomaly=200,
-          sheriff=sheriff_key)
+          ref_test=ref_test_key, sheriff=sheriff_key)
       anomaly_entity.SetIsImprovement()
       anomaly_key = anomaly_entity.put()
       key_map[end_rev] = anomaly_key.urlsafe()
@@ -67,11 +69,12 @@ class AlertsTest(testing_common.TestCase):
     # Add some (2) already-triaged alerts.
     for end_rev in range(10120, 10140, 10):
       test_key = first_paint if end_rev % 20 == 0 else mean_frame_time
+      ref_test_key = utils.TestKey('%s_ref' % utils.TestPath(test_key))
       bug_id = -1 if end_rev % 20 == 0 else 12345
       anomaly_entity = anomaly.Anomaly(
           start_revision=end_rev - 5, end_revision=end_rev, test=test_key,
           median_before_anomaly=100, median_after_anomaly=200,
-          bug_id=bug_id, sheriff=sheriff_key)
+          ref_test=ref_test_key, bug_id=bug_id, sheriff=sheriff_key)
       anomaly_entity.SetIsImprovement()
       anomaly_key = anomaly_entity.put()
       key_map[end_rev] = anomaly_key.urlsafe()
@@ -81,15 +84,15 @@ class AlertsTest(testing_common.TestCase):
     # Add some (6) non-triaged improvements.
     for end_rev in range(10140, 10200, 10):
       test_key = mean_frame_time
+      ref_test_key = utils.TestKey('%s_ref' % utils.TestPath(test_key))
       anomaly_entity = anomaly.Anomaly(
           start_revision=end_rev - 5, end_revision=end_rev, test=test_key,
           median_before_anomaly=200, median_after_anomaly=100,
-          sheriff=sheriff_key)
+          ref_test=ref_test_key, sheriff=sheriff_key)
       anomaly_entity.SetIsImprovement()
       anomaly_key = anomaly_entity.put()
       self.assertTrue(anomaly_entity.is_improvement)
       key_map[end_rev] = anomaly_key.urlsafe()
-
     return key_map
 
   def testGet(self):
@@ -115,13 +118,20 @@ class AlertsTest(testing_common.TestCase):
       self.assertEqual('scrolling-benchmark', alert['testsuite'])
       if expected_end_rev % 20 == 0:
         self.assertEqual('first_paint', alert['test'])
+        self.assertEqual(
+            'ChromiumGPU/linux-release/scrolling-benchmark/first_paint_ref',
+            alert['ref_test'])
       else:
         self.assertEqual('mean_frame_time', alert['test'])
+        self.assertEqual(
+            'ChromiumGPU/linux-release/scrolling-benchmark/mean_frame_time_ref',
+            alert['ref_test'])
       self.assertEqual('100.0%', alert['percent_changed'])
       self.assertIsNone(alert['bug_id'])
       expected_end_rev -= 10
     self.assertEqual(expected_end_rev, 9990)
 
+  @unittest.skipIf(sys.platform.startswith('win'), 'bad mock datastore')
   def testPost_TriagedParameterSet_TriagedListed(self):
     self._AddAlertsToDataStore()
     response = self.testapp.post('/alerts', {'triaged': 'true'})
@@ -157,8 +167,8 @@ class AlertsTest(testing_common.TestCase):
         id='Sheriff2', email='sullivan@google.com').put()
     mean_frame_time = utils.TestKey(
         'ChromiumGPU/linux-release/scrolling-benchmark/mean_frame_time')
-    anomalies = anomaly.Anomaly.query(
-        anomaly.Anomaly.test == mean_frame_time).fetch()
+    anomalies, _, _ = anomaly.Anomaly.QueryAsync(
+        test=mean_frame_time).get_result()
     for anomaly_entity in anomalies:
       anomaly_entity.sheriff = sheriff2_key
       anomaly_entity.put()
@@ -172,43 +182,39 @@ class AlertsTest(testing_common.TestCase):
     self.assertEqual('Chromium Perf Sheriff', sheriff_list[0])
     self.assertEqual('Sheriff2', sheriff_list[1])
 
-  def testPost_StoppageAlerts_EmbedsStoppageAlertListAndOneTable(self):
-    sheriff.Sheriff(id='Sheriff', patterns=['M/b/*/*']).put()
-    testing_common.AddTests(['M'], ['b'], {'foo': {'bar': {}}})
-    test_key = utils.TestKey('M/b/foo/bar')
-    rows = testing_common.AddRows('M/b/foo/bar', {9800, 9802})
-    for row in rows:
-      stoppage_alert.CreateStoppageAlert(test_key.get(), row).put()
-    response = self.testapp.post('/alerts?sheriff=Sheriff')
-    stoppage_alert_list = self.GetJsonValue(response, 'stoppage_alert_list')
-    self.assertEqual(2, len(stoppage_alert_list))
-
-  @mock.patch('logging.error')
-  def testPost_StoppageAlertWithBogusRow_LogsErrorAndShowsTable(
-      self, mock_logging_error):
-    sheriff.Sheriff(id='Sheriff', patterns=['M/b/*/*']).put()
-    testing_common.AddTests(['M'], ['b'], {'foo': {'bar': {}}})
-    test_key = utils.TestKey('M/b/foo/bar')
-    row_parent = utils.GetTestContainerKey(test_key)
-    row = graph_data.Row(parent=row_parent, id=1234)
-    stoppage_alert.CreateStoppageAlert(test_key.get(), row).put()
-    response = self.testapp.post('/alerts?sheriff=Sheriff')
-    stoppage_alert_list = self.GetJsonValue(response, 'stoppage_alert_list')
-    self.assertEqual(1, len(stoppage_alert_list))
-    self.assertEqual(1, mock_logging_error.call_count)
-
   def testPost_WithBogusSheriff_HasErrorMessage(self):
     response = self.testapp.post('/alerts?sheriff=Foo')
     error = self.GetJsonValue(response, 'error')
     self.assertIsNotNone(error)
 
   def testPost_ExternalUserRequestsInternalOnlySheriff_ErrorMessage(self):
+    self.UnsetCurrentUser()
     sheriff.Sheriff(id='Foo', internal_only=True).put()
     self.assertFalse(utils.IsInternalUser())
     response = self.testapp.post('/alerts?sheriff=Foo')
     error = self.GetJsonValue(response, 'error')
     self.assertIsNotNone(error)
 
+  def testPost_AnomalyCursorSet_ReturnsNextCursorAndShowMore(self):
+    self._AddAlertsToDataStore()
+    # Need to post to the app once to get the initial cursor.
+    response = self.testapp.post('/alerts', {'max_anomalies_to_show': 5})
+    anomaly_list = self.GetJsonValue(response, 'anomaly_list')
+    anomaly_cursor = self.GetJsonValue(response, 'anomaly_cursor')
+
+    response = self.testapp.post(
+        '/alerts',
+        {'anomaly_cursor': anomaly_cursor, 'max_anomalies_to_show': 5})
+    anomaly_list2 = self.GetJsonValue(response, 'anomaly_list')
+    anomalies_show_more = self.GetJsonValue(response, 'show_more_anomalies')
+    anomaly_cursor = self.GetJsonValue(response, 'anomaly_cursor')
+    anomaly_count = self.GetJsonValue(response, 'anomaly_count')
+    self.assertEqual(5, len(anomaly_list2))
+    self.assertTrue(anomalies_show_more)
+    self.assertIsNotNone(anomaly_cursor)  # Don't know what this will be.
+    self.assertEqual(12, anomaly_count)
+    for a in anomaly_list:  # Ensure anomaly_lists aren't equal.
+      self.assertNotIn(a, anomaly_list2)
 
 if __name__ == '__main__':
   unittest.main()

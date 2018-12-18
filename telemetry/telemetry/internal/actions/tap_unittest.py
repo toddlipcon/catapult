@@ -13,7 +13,9 @@ class TapActionTest(tab_test_case.TabTestCase):
     action.WillRunAction(self._tab)
     action.RunAction(self._tab)
 
-  @decorators.Disabled('win')  # http://crbug.com/634343
+  # https://github.com/catapult-project/catapult/issues/3099 (Android)
+  # http://crbug.com/634343 (Windows)
+  @decorators.Disabled('android', 'win')
   def testTapSinglePage(self):
     self.Navigate('page_with_clickables.html')
 
@@ -33,7 +35,7 @@ class TapActionTest(tab_test_case.TabTestCase):
   def testTapNavigate(self):
     self.Navigate('page_with_link.html')
     self._PerformTapAction(selector='#clickme')
-    self._tab.WaitForJavaScriptExpression(
+    self._tab.WaitForJavaScriptCondition(
         'document.location.pathname === "/blank.html"', timeout=5)
-    self._tab.WaitForJavaScriptExpression(
+    self._tab.WaitForJavaScriptCondition(
         'document.readyState === "complete"', timeout=5)

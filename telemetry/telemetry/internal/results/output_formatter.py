@@ -2,6 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import os
+
 from telemetry.value import summary as summary_module
 
 class OutputFormatter(object):
@@ -33,7 +35,10 @@ class OutputFormatter(object):
     """
     raise NotImplementedError()
 
-  def FormatDisabled(self):
+  def PrintViewResults(self):
+    print 'View result at file://' + os.path.abspath(self.output_stream.name)
+
+  def FormatDisabled(self, page_test_results):
     """Formats disabled results into the output stream.
 
     This will be called once when a benchmark is run but disabled.
@@ -45,7 +50,7 @@ class OutputFormatter(object):
     return self._output_stream
 
 
-def SummarizePageSpecificValues(page_specific_values):
+def SummarizePageSpecificValues(results):
   """Summarize results appropriately for TBM and legacy benchmarks.
 
   For benchmarks that are timeline-based, we need to summarize not once, but
@@ -58,13 +63,12 @@ def SummarizePageSpecificValues(page_specific_values):
   """
   # Default summary uses merge_values.DefaultKeyFunc to summarize both by name
   # and tir_label.
-  summary = summary_module.Summary(page_specific_values)
+  summary = summary_module.Summary(results)
   values = summary.interleaved_computed_per_page_values_and_summaries
 
-  if any(v.tir_label for v in page_specific_values):
+  if any(v.tir_label for v in results.all_page_specific_values):
     summary_by_name_only = summary_module.Summary(
-        page_specific_values,
-        key_func=lambda v: v.name)
+        results, key_func=lambda v: v.name)
     values.extend(
         summary_by_name_only.interleaved_computed_per_page_values_and_summaries
     )

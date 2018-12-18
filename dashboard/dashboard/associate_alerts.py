@@ -9,12 +9,11 @@ import re
 from google.appengine.api import users
 from google.appengine.ext import ndb
 
-from dashboard import issue_tracker_service
 from dashboard import oauth2_decorator
-from dashboard import request_handler
-from dashboard import utils
+from dashboard.common import request_handler
+from dashboard.common import utils
 from dashboard.models import anomaly
-from dashboard.models import stoppage_alert
+from dashboard.services import issue_tracker_service
 
 
 class AssociateAlertsHandler(request_handler.RequestHandler):
@@ -127,6 +126,7 @@ class AssociateAlertsHandler(request_handler.RequestHandler):
 
     for a in alert_entities:
       a.bug_id = bug_id
+
     ndb.put_multi(alert_entities)
 
     self.RenderHtml('bug_result.html', {'bug_id': bug_id})
@@ -144,11 +144,8 @@ class AssociateAlertsHandler(request_handler.RequestHandler):
     if not utils.MinimumAlertRange(alerts):
       return 'Selected alerts do not have overlapping revision range.'
     else:
-      anomalies_with_bug = anomaly.Anomaly.query(
-          anomaly.Anomaly.bug_id == bug_id).fetch()
-      stoppage_alerts_with_bug = stoppage_alert.StoppageAlert.query(
-          stoppage_alert.StoppageAlert.bug_id == bug_id).fetch()
-      alerts_with_bug = anomalies_with_bug + stoppage_alerts_with_bug
+      alerts_with_bug, _, _ = anomaly.Anomaly.QueryAsync(
+          bug_id=bug_id, limit=500).get_result()
 
       if not alerts_with_bug:
         return None

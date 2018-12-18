@@ -38,8 +38,9 @@ def _ValidateDependenciesFile(input_api, output_api, dependencies_path):
         input_api.os_path.join(telemetry_dir, 'json_format'),
         dependencies_path], input_api)
     if return_code:
-      results.append(output_api.PresubmitError(
-           'Validating %s failed:' % dependencies_path, long_text=out))
+      results.append(
+          output_api.PresubmitError(
+              'Validating %s failed:' % dependencies_path, long_text=out))
       break
     out, return_code = _RunArgs([
         input_api.python_executable,
@@ -102,7 +103,6 @@ def _GetPathsToPrepend(input_api):
       input_api.os_path.join(catapult_dir, 'devil'),
       input_api.os_path.join(catapult_dir, 'systrace'),
       input_api.os_path.join(catapult_dir, 'tracing'),
-      input_api.os_path.join(catapult_dir, 'common', 'battor'),
       input_api.os_path.join(catapult_dir, 'common', 'py_trace_event'),
 
       input_api.os_path.join(catapult_dir, 'third_party', 'mock'),

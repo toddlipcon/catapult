@@ -16,11 +16,10 @@ from google.appengine.ext import ndb
 
 from dashboard import add_point
 from dashboard import add_point_queue
-from dashboard import layered_cache
-from dashboard import stored_object
-from dashboard import testing_common
 from dashboard import units_to_direction
-from dashboard import utils
+from dashboard.common import layered_cache
+from dashboard.common import testing_common
+from dashboard.common import utils
 from dashboard.models import anomaly
 from dashboard.models import anomaly_config
 from dashboard.models import graph_data
@@ -123,6 +122,42 @@ _SAMPLE_DASHBOARD_JSON_WITH_TRACE = {
     }
 }
 
+# Sample Dashboard JSON v1.0 point with a story name that should be escaped.
+_SAMPLE_DASHBOARD_JSON_ESCAPE_STORYNAME = {
+    'master': 'ChromiumPerf',
+    'bot': 'win7',
+    'point_id': '12345',
+    'test_suite_name': 'my_test_suite',
+    'supplemental': {
+        'os': 'mavericks',
+        'gpu_oem': 'intel'
+    },
+    'versions': {
+        'chrome': '12.3.45.6',
+    },
+    'chart_data': {
+        'benchmark_name': 'my_benchmark',
+        'benchmark_description': 'foo',
+        'format_version': '1.0',
+        'charts': {
+            'my_test': {
+                'http://www.cnn.com/story': {
+                    'type': 'scalar',
+                    'name': 'my_test1',
+                    'units': 'ms',
+                    'value': 22.4,
+                },
+                'http://www.yahoo.com/': {
+                    'type': 'scalar',
+                    'name': 'my_test2',
+                    'units': 'ms',
+                    'value': 33.2,
+                }
+            }
+        }
+    }
+}
+
 # Units to direction to use in the tests below.
 _UNITS_TO_DIRECTION_DICT = {
     'ms': {'improvement_direction': 'down'},
@@ -148,7 +183,7 @@ class AddPointTest(testing_common.TestCase):
     testing_common.SetIpWhitelist([_WHITELISTED_IP])
     self.SetCurrentUser('foo@bar.com', is_admin=True)
 
-  @mock.patch.object(add_point_queue.find_anomalies, 'ProcessTest')
+  @mock.patch.object(add_point_queue.find_anomalies, 'ProcessTestsAsync')
   def testPost(self, mock_process_test):
     """Tests all basic functionality of a POST request."""
     sheriff.Sheriff(
@@ -196,13 +231,11 @@ class AddPointTest(testing_common.TestCase):
     self.assertEqual('1355', rows[0].r_webkit)
     self.assertEqual('hello', rows[0].a_extra)
     self.assertEqual(22.2, rows[0].d_median)
-    self.assertTrue(rows[0].internal_only)
 
     # Verify all properties of the second Row.
     self.assertEqual(12345, rows[1].key.id())
     self.assertEqual(12345, rows[1].revision)
     self.assertEqual(44.3, rows[1].value)
-    self.assertTrue(rows[1].internal_only)
     self.assertEqual(
         'ChromiumPerf/win7/dromaeo/jslib', utils.TestPath(rows[1].parent_test))
     self.assertEqual('Test', rows[1].parent_test.kind())
@@ -220,9 +253,6 @@ class AddPointTest(testing_common.TestCase):
     self.assertFalse(tests[0].has_rows)
     self.assertEqual('ChromiumPerf/win7/dromaeo', tests[0].test_path)
     self.assertTrue(tests[0].internal_only)
-    self.assertEqual(1, len(tests[0].monitored))
-    self.assertEqual(
-        'ChromiumPerf/win7/dromaeo/dom', tests[0].monitored[0].string_id())
     self.assertIsNone(tests[0].units)
 
     self.assertEqual('ChromiumPerf/win7/dromaeo/dom', tests[1].key.id())
@@ -256,9 +286,9 @@ class AddPointTest(testing_common.TestCase):
     self.assertIsNone(masters[0].key.parent())
 
     # Verify that an anomaly processing was called.
-    mock_process_test.assert_called_once_with(tests[1].key)
+    mock_process_test.assert_called_once_with([tests[1].key])
 
-  @mock.patch.object(add_point_queue.find_anomalies, 'ProcessTest')
+  @mock.patch.object(add_point_queue.find_anomalies, 'ProcessTestsAsync')
   def testPost_TestNameEndsWithUnderscoreRef_ProcessTestIsNotCalled(
       self, mock_process_test):
     """Tests that Tests ending with "_ref" aren't analyzed for Anomalies."""
@@ -270,9 +300,9 @@ class AddPointTest(testing_common.TestCase):
         '/add_point', {'data': json.dumps([point])},
         extra_environ={'REMOTE_ADDR': _WHITELISTED_IP})
     self.ExecuteTaskQueueTasks('/add_point_queue', add_point._TASK_QUEUE_NAME)
-    self.assertFalse(mock_process_test.called)
+    mock_process_test.assert_called_once_with([])
 
-  @mock.patch.object(add_point_queue.find_anomalies, 'ProcessTest')
+  @mock.patch.object(add_point_queue.find_anomalies, 'ProcessTestsAsync')
   def testPost_TestNameEndsWithSlashRef_ProcessTestIsNotCalled(
       self, mock_process_test):
     """Tests that leaf tests named ref aren't added to the task queue."""
@@ -284,9 +314,9 @@ class AddPointTest(testing_common.TestCase):
         '/add_point', {'data': json.dumps([point])},
         extra_environ={'REMOTE_ADDR': _WHITELISTED_IP})
     self.ExecuteTaskQueueTasks('/add_point_queue', add_point._TASK_QUEUE_NAME)
-    self.assertFalse(mock_process_test.called)
+    mock_process_test.assert_called_once_with([])
 
-  @mock.patch.object(add_point_queue.find_anomalies, 'ProcessTest')
+  @mock.patch.object(add_point_queue.find_anomalies, 'ProcessTestsAsync')
   def testPost_TestNameEndsContainsButDoesntEndWithRef_ProcessTestIsCalled(
       self, mock_process_test):
     sheriff.Sheriff(
@@ -352,6 +382,55 @@ class AddPointTest(testing_common.TestCase):
     self.testapp.post(
         '/add_point', {'data': json.dumps([point])}, status=400,
         extra_environ={'REMOTE_ADDR': _WHITELISTED_IP})
+
+  def testPost_BenchmarkName_Slash_DataRejected(self):
+    """Tests that an error is returned when the test name has too many parts."""
+    point = copy.deepcopy(_SAMPLE_DASHBOARD_JSON)
+    point['test_suite_name'] = 'no/slashes'
+    response = self.testapp.post(
+        '/add_point', {'data': json.dumps(point)}, status=400,
+        extra_environ={'REMOTE_ADDR': _WHITELISTED_IP})
+    self.assertIn('Illegal slash in test_suite_name', response.body)
+
+  def testPost_BenchmarkName_NotString_DataRejected(self):
+    point = copy.deepcopy(_SAMPLE_DASHBOARD_JSON)
+    point['test_suite_name'] = ['name']
+    response = self.testapp.post(
+        '/add_point', {'data': json.dumps(point)}, status=400,
+        extra_environ={'REMOTE_ADDR': _WHITELISTED_IP})
+    self.assertIn('Error: test_suite_name must be a string', response.body)
+
+  def testPost_BotName_Slash_DataRejected(self):
+    point = copy.deepcopy(_SAMPLE_DASHBOARD_JSON)
+    point['bot'] = 'no/slashes'
+    response = self.testapp.post(
+        '/add_point', {'data': json.dumps(point)}, status=400,
+        extra_environ={'REMOTE_ADDR': _WHITELISTED_IP})
+    self.assertIn('Illegal slash in bot', response.body)
+
+  def testPost_BotName_NotString_DataRejected(self):
+    point = copy.deepcopy(_SAMPLE_DASHBOARD_JSON)
+    point['bot'] = ['name']
+    response = self.testapp.post(
+        '/add_point', {'data': json.dumps(point)}, status=400,
+        extra_environ={'REMOTE_ADDR': _WHITELISTED_IP})
+    self.assertIn('Error: bot must be a string', response.body)
+
+  def testPost_MasterName_Slash_DataRejected(self):
+    point = copy.deepcopy(_SAMPLE_DASHBOARD_JSON)
+    point['master'] = 'no/slashes'
+    response = self.testapp.post(
+        '/add_point', {'data': json.dumps(point)}, status=400,
+        extra_environ={'REMOTE_ADDR': _WHITELISTED_IP})
+    self.assertIn('Illegal slash in master', response.body)
+
+  def testPost_MasterName_NotString_DataRejected(self):
+    point = copy.deepcopy(_SAMPLE_DASHBOARD_JSON)
+    point['master'] = ['name']
+    response = self.testapp.post(
+        '/add_point', {'data': json.dumps(point)}, status=400,
+        extra_environ={'REMOTE_ADDR': _WHITELISTED_IP})
+    self.assertIn('Error: master must be a string', response.body)
 
   def testPost_TestNameHasDoubleUnderscores_Rejected(self):
     point = copy.deepcopy(_SAMPLE_POINT)
@@ -425,13 +504,12 @@ class AddPointTest(testing_common.TestCase):
     self.assertFalse(hasattr(row, 'r_two'))
 
   def testPost_UnWhitelistedBots_MarkedInternalOnly(self):
-    stored_object.Set(
-        add_point_queue.BOT_WHITELIST_KEY, ['linux-release', 'win7'])
     parent = graph_data.Master(id='ChromiumPerf').put()
-    parent = graph_data.Bot(
-        id='suddenly_secret', parent=parent, internal_only=False).put()
-    graph_data.TestMetadata(
-        id='ChromiumPerf/suddenly_secret/dromaeo', internal_only=False).put()
+    parent = graph_data.Bot(id='win7', parent=parent, internal_only=False).put()
+    t = graph_data.TestMetadata(
+        id='ChromiumPerf/suddenly_secret/dromaeo', internal_only=False)
+    t.UpdateSheriff()
+    t.put()
 
     data_param = json.dumps([
         {
@@ -495,12 +573,9 @@ class AddPointTest(testing_common.TestCase):
 
     rows = graph_data.Row.query().fetch(limit=_FETCH_LIMIT)
     self.assertEqual(3, len(rows))
-    self.assertTrue(rows[0].internal_only)
-    self.assertTrue(rows[1].internal_only)
-    self.assertFalse(rows[2].internal_only)
 
   @mock.patch.object(
-      add_point_queue.find_anomalies, 'ProcessTest', mock.MagicMock())
+      add_point_queue.find_anomalies, 'ProcessTestsAsync', mock.MagicMock())
   def testPost_NewTest_SheriffPropertyIsAdded(self):
     """Tests that sheriffs are added to tests when Tests are created."""
     sheriff1 = sheriff.Sheriff(
@@ -551,13 +626,6 @@ class AddPointTest(testing_common.TestCase):
     no_sheriff_test = ndb.Key(
         'TestMetadata', 'ChromiumWebkit/win7/dromaeo/jslib').get()
     self.assertIsNone(no_sheriff_test.sheriff)
-
-    test_suite = ndb.Key(
-        'TestMetadata', 'ChromiumPerf/win7/scrolling_benchmark').get()
-    self.assertEqual(1, len(test_suite.monitored))
-    self.assertEqual(
-        'ChromiumPerf/win7/scrolling_benchmark/mean_frame_time',
-        test_suite.monitored[0].string_id())
 
   def testPost_NewTest_AnomalyConfigPropertyIsAdded(self):
     """Tests that AnomalyConfig keys are added to TestMetadata upon creation.
@@ -617,6 +685,37 @@ class AddPointTest(testing_common.TestCase):
         'TestMetadata', 'ChromiumWebkit/win7/dromaeo/jslib').get()
     self.assertIsNone(no_config_test.overridden_anomaly_config)
 
+  def testPost_NewTest_ClosestsAnomlyConfigIsUsed(self):
+    anomaly_config.AnomalyConfig(
+        id='anomaly_config1', config='',
+        patterns=['ChromiumPerf/*/dromaeo/*']).put()
+    anomaly_config2 = anomaly_config.AnomalyConfig(
+        id='anomaly_config2', config='',
+        patterns=['ChromiumPerf/*/dromaeo/benchmark_duration']).put()
+    anomaly_config.AnomalyConfig(
+        id='anomaly_config3', config='',
+        patterns=['ChromiumPerf/*/*/*']).put()
+
+    data_param = json.dumps([
+        {
+            'master': 'ChromiumPerf',
+            'bot': 'win',
+            'test': 'dromaeo/benchmark_duration',
+            'revision': 123456,
+            'value': 700,
+        }
+    ])
+    self.testapp.post(
+        '/add_point', {'data': data_param},
+        extra_environ={'REMOTE_ADDR': _WHITELISTED_IP})
+
+    self.ExecuteTaskQueueTasks('/add_point_queue', add_point._TASK_QUEUE_NAME)
+
+    anomaly_config1_test = ndb.Key(
+        'TestMetadata', 'ChromiumPerf/win/dromaeo/benchmark_duration').get()
+    self.assertEqual(
+        anomaly_config2, anomaly_config1_test.overridden_anomaly_config)
+
   def testPost_NewTest_AddsUnits(self):
     """Checks units and improvement direction are added for new TestMetadata."""
     data_param = json.dumps([
@@ -651,11 +750,16 @@ class AddPointTest(testing_common.TestCase):
     parent = graph_data.Master(id='ChromiumPerf').put()
     parent = graph_data.Bot(id='win7', parent=parent).put()
     parent = graph_data.TestMetadata(
-        id='ChromiumPerf/win7/scrolling_benchmark').put()
-    graph_data.TestMetadata(
+        id='ChromiumPerf/win7/scrolling_benchmark')
+    parent.UpdateSheriff()
+    parent.put()
+
+    t = graph_data.TestMetadata(
         id='ChromiumPerf/win7/scrolling_benchmark/mean_frame_time',
         units='ms',
-        improvement_direction=anomaly.DOWN).put()
+        improvement_direction=anomaly.DOWN)
+    t.UpdateSheriff()
+    t.put()
 
     data_param = json.dumps([
         {
@@ -690,10 +794,17 @@ class AddPointTest(testing_common.TestCase):
     parent = graph_data.Master(id='ChromiumPerf').put()
     parent = graph_data.Bot(id='win7', parent=parent).put()
     parent = graph_data.TestMetadata(
-        id='ChromiumPerf/win7/scrolling_benchmark').put()
+        id='ChromiumPerf/win7/scrolling_benchmark')
+    parent.UpdateSheriff()
+    parent.put()
+
     frame_time_key = graph_data.TestMetadata(
         id='ChromiumPerf/win7/scrolling_benchmark/frame_time', units='ms',
-        improvement_direction=anomaly.DOWN).put()
+        improvement_direction=anomaly.DOWN)
+    frame_time_key.UpdateSheriff()
+    frame_time_key.put()
+    frame_time_key = frame_time_key.key
+
     # Before sending the new data point, the improvement direction is down.
     test = frame_time_key.get()
     self.assertEqual(anomaly.DOWN, test.improvement_direction)
@@ -725,11 +836,17 @@ class AddPointTest(testing_common.TestCase):
     parent = graph_data.Master(id='ChromiumPerf').put()
     parent = graph_data.Bot(id='win7', parent=parent).put()
     parent = graph_data.TestMetadata(
-        id='ChromiumPerf/win7/scrolling_benchmark').put()
-    graph_data.TestMetadata(
+        id='ChromiumPerf/win7/scrolling_benchmark')
+    parent.UpdateSheriff()
+    parent.put()
+
+    t = graph_data.TestMetadata(
         id='ChromiumPerf/win7/scrolling_benchmark/mean_frame_time',
         units='ms',
-        improvement_direction=anomaly.UNKNOWN).put()
+        improvement_direction=anomaly.UNKNOWN)
+    t.UpdateSheriff()
+    t.put()
+
     point = {
         'master': 'ChromiumPerf',
         'bot': 'win7',
@@ -758,11 +875,16 @@ class AddPointTest(testing_common.TestCase):
     """Tests that adding a point sets the test to be non-deprecated."""
     parent = graph_data.Master(id='ChromiumPerf').put()
     parent = graph_data.Bot(id='win7', parent=parent).put()
-    graph_data.TestMetadata(
-        id='ChromiumPerf/win7/scrolling_benchmark', deprecated=True).put()
-    graph_data.TestMetadata(
+    t = graph_data.TestMetadata(
+        id='ChromiumPerf/win7/scrolling_benchmark', deprecated=True)
+    t.UpdateSheriff()
+    t.put()
+
+    t = graph_data.TestMetadata(
         id='ChromiumPerf/win7/scrolling_benchmark/mean_frame_time',
-        deprecated=True).put()
+        deprecated=True)
+    t.UpdateSheriff()
+    t.put()
 
     point = {
         'master': 'ChromiumPerf',
@@ -1104,19 +1226,6 @@ class AddPointTest(testing_common.TestCase):
     self.assertIsNone(utils.TestKey('ChromiumPerf/win7/my_test_suite').get())
     self.assertIsNotNone(utils.TestKey('ChromiumPerf/win7/my_benchmark').get())
 
-  def testPost_WithBenchmarkRerunOptions_AddsTraceRerunOptions(self):
-    sample_json = copy.deepcopy(_SAMPLE_DASHBOARD_JSON)
-    sample_json['chart_data']['trace_rerun_options'] = [['foo', '--foo']]
-    data_param = json.dumps(sample_json)
-    self.testapp.post(
-        '/add_point', {'data': data_param},
-        extra_environ={'REMOTE_ADDR': _WHITELISTED_IP})
-
-    self.ExecuteTaskQueueTasks('/add_point_queue', add_point._TASK_QUEUE_NAME)
-
-    rows = graph_data.Row.query().fetch(limit=_FETCH_LIMIT)
-    self.assertEqual('--foo', rows[0].a_trace_rerun_options.foo)
-
   def testPost_FormatV1_CorrectlyAdded(self):
     """Tests that adding a chart causes the correct trace to be added."""
     data_param = json.dumps(_SAMPLE_DASHBOARD_JSON_WITH_TRACE)
@@ -1134,6 +1243,48 @@ class AddPointTest(testing_common.TestCase):
     self.assertEqual(33.2, rows[1].value)
     self.assertEqual('https://console.developer.google.com/m',
                      rows[1].a_tracing_uri)
+
+  def testPost_FormatV1_StoryNameEscaped(self):
+    data_param = json.dumps(_SAMPLE_DASHBOARD_JSON_ESCAPE_STORYNAME)
+    self.testapp.post(
+        '/add_point', {'data': data_param},
+        extra_environ={'REMOTE_ADDR': _WHITELISTED_IP})
+    self.ExecuteTaskQueueTasks('/add_point_queue', add_point._TASK_QUEUE_NAME)
+    k = ndb.Key(
+        'TestMetadata',
+        'ChromiumPerf/win7/my_test_suite/my_test/http___www.cnn.com_story')
+    t = k.get()
+    self.assertEqual('http://www.cnn.com/story', t.unescaped_story_name)
+    k = ndb.Key(
+        'TestMetadata',
+        'ChromiumPerf/win7/my_test_suite/my_test/http___www.yahoo.com_')
+    t = k.get()
+    self.assertEqual('http://www.yahoo.com/', t.unescaped_story_name)
+
+  def testPost_FormatV1_StoryNameEscapedUpdated(self):
+    t = graph_data.TestMetadata(
+        id='ChromiumPerf/win7/my_test_suite/my_test/http___www.cnn.com_story',
+        description='bar')
+    t.UpdateSheriff()
+    t.put()
+    self.assertEqual(None, t.unescaped_story_name)
+    data_param = json.dumps(_SAMPLE_DASHBOARD_JSON_ESCAPE_STORYNAME)
+    self.testapp.post(
+        '/add_point', {'data': data_param},
+        extra_environ={'REMOTE_ADDR': _WHITELISTED_IP})
+    self.ExecuteTaskQueueTasks('/add_point_queue', add_point._TASK_QUEUE_NAME)
+    k = ndb.Key(
+        'TestMetadata',
+        'ChromiumPerf/win7/my_test_suite/my_test/http___www.cnn.com_story')
+    t = k.get()
+    self.assertEqual('http://www.cnn.com/story', t.unescaped_story_name)
+
+  def testPost_FormatV1_BadCharts_Rejected(self):
+    chart = copy.deepcopy(_SAMPLE_DASHBOARD_JSON)
+    chart['chart_data']['charts'] = {'test': False}
+    self.testapp.post(
+        '/add_point', {'data': json.dumps(chart)}, status=400,
+        extra_environ={'REMOTE_ADDR': _WHITELISTED_IP})
 
   def testPost_FormatV1_BadMaster_Rejected(self):
     """Tests that attempting to post with no master name will error."""

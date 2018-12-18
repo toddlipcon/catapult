@@ -5,10 +5,9 @@
 import unittest
 
 from dashboard import add_point_queue
-from dashboard import testing_common
-from dashboard import utils
+from dashboard.common import testing_common
+from dashboard.models import anomaly
 from dashboard.models import graph_data
-from dashboard.models import stoppage_alert
 
 
 class GetOrCreateAncestorsTest(testing_common.TestCase):
@@ -20,10 +19,19 @@ class GetOrCreateAncestorsTest(testing_common.TestCase):
   def testGetOrCreateAncestors_GetsExistingEntities(self):
     master_key = graph_data.Master(id='ChromiumPerf', parent=None).put()
     graph_data.Bot(id='win7', parent=master_key).put()
-    graph_data.TestMetadata(id='ChromiumPerf/win7/dromaeo',).put()
-    graph_data.TestMetadata(id='ChromiumPerf/win7/dromaeo/dom').put()
-    graph_data.TestMetadata(id='ChromiumPerf/win7/dromaeo/dom/modify').put()
-    actual_parent = add_point_queue._GetOrCreateAncestors(
+    t = graph_data.TestMetadata(id='ChromiumPerf/win7/dromaeo',)
+    t.UpdateSheriff()
+    t.put()
+
+    t = graph_data.TestMetadata(id='ChromiumPerf/win7/dromaeo/dom')
+    t.UpdateSheriff()
+    t.put()
+
+    t = graph_data.TestMetadata(id='ChromiumPerf/win7/dromaeo/dom/modify')
+    t.UpdateSheriff()
+    t.put()
+
+    actual_parent = add_point_queue.GetOrCreateAncestors(
         'ChromiumPerf', 'win7', 'dromaeo/dom/modify')
     self.assertEqual(
         'ChromiumPerf/win7/dromaeo/dom/modify', actual_parent.key.id())
@@ -35,7 +43,7 @@ class GetOrCreateAncestorsTest(testing_common.TestCase):
     self.assertEqual(3, len(graph_data.TestMetadata.query().fetch()))
 
   def testGetOrCreateAncestors_CreatesAllExpectedEntities(self):
-    parent = add_point_queue._GetOrCreateAncestors(
+    parent = add_point_queue.GetOrCreateAncestors(
         'ChromiumPerf', 'win7', 'dromaeo/dom/modify')
     self.assertEqual('ChromiumPerf/win7/dromaeo/dom/modify', parent.key.id())
     # Check that all the Bot and TestMetadata entities were correctly added.
@@ -62,16 +70,11 @@ class GetOrCreateAncestorsTest(testing_common.TestCase):
         'ChromiumPerf/win7/dromaeo/dom', created_tests[2].parent_test.id())
     self.assertIsNone(created_tests[2].bot)
 
-  def testGetOrCreateAncestors_UpdatesStoppageAlert(self):
-    testing_common.AddTests(['M'], ['b'], {'suite': {'foo': {}}})
-    row = testing_common.AddRows('M/b/suite/foo', {123})[0]
-    test = utils.TestKey('M/b/suite/foo').get()
-    alert_key = stoppage_alert.CreateStoppageAlert(test, row).put()
-    test.stoppage_alert = alert_key
-    test.put()
-    add_point_queue._GetOrCreateAncestors('M', 'b', 'suite/foo')
-    self.assertIsNone(test.key.get().stoppage_alert)
-    self.assertTrue(alert_key.get().recovered)
+  def testGetOrCreateAncestors_RespectsImprovementDirectionForNewTest(self):
+    test = add_point_queue.GetOrCreateAncestors(
+        'M', 'b', 'suite/foo', units='bogus',
+        improvement_direction=anomaly.UP)
+    self.assertEqual(anomaly.UP, test.improvement_direction)
 
 
 if __name__ == '__main__':

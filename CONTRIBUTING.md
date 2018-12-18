@@ -10,12 +10,12 @@ our our repos and organizations, mailing lists, and other communications.
 
 # Workflow
 
-Install [depot_tools]
-(https://www.chromium.org/developers/how-tos/install-depot-tools).
+Install [depot_tools](
+https://www.chromium.org/developers/how-tos/install-depot-tools).
 
 Then checkout the catapult repo.
 
-`git clone https://github.com/catapult-project/catapult.git`
+`git clone https://chromium.googlesource.com/catapult`
 
 You can then create a local branch, make and commit your change.
 
@@ -30,9 +30,9 @@ Once you're ready for a review do:
 
 `git cl upload`
 
-Once uploaded you can view the CL in Rietveld and **request a review** by
-clicking the 'publish & mail' link, and adding a reviewer from the
-[OWNERS](/OWNERS) file. You can also click the "CQ Dry Run" link to run all
+Once uploaded you can view the CL in Gerrit and **request a review** by
+clicking the "Start Review" button, and adding a reviewer from the
+[OWNERS](/OWNERS) file. You can also click the "CQ Dry Run" button to run all
 the tests on your change.
 
 If you get review feedback, edit and commit locally and then do another upload
@@ -48,16 +48,29 @@ git checkout master
 git branch -D foo
 ```
 
+# Troubleshooting
+
+If you get errors running git cl:
+```
+Credentials for the following hosts are required:
+  github-review.com
+  github.com
+```
+Then you cloned the github url of this repository. That confuses git cl /o\.
+To make things work, you'll need to re-clone from
+https://chromium.googlesource.com/catapult for things to work.
+
+
 # Becoming a committer
 
 If you're new to the chromium-family of projects, you will also need to sign the
 chrome contributors license agreement. You can sign the
-[Contributor License Agreement]
-(https://cla.developers.google.com/about/google-individual?csw=1), which you can
+[Contributor License Agreement](
+https://cla.developers.google.com/about/google-individual?csw=1), which you can
 do online.
 It only takes a minute. If you are contributing on behalf of a corporation, you
-must fill out the [Corporate Contributor License Agreement]
-(https://cla.developers.google.com/about/google-corporate?csw=1) and send it to
+must fill out the [Corporate Contributor License Agreement](
+https://cla.developers.google.com/about/google-corporate?csw=1) and send it to
 us as described on that page.
 
 If you've never submitted code before, you must add your (or your
@@ -85,7 +98,7 @@ In order to be able to land patches, you will most likely need to update the
 repository. You can do this by executing the following command inside the
 catapult folder (third_party/catapult):
 
-`git remote set-url origin git@github.com:catapult-project/catapult`
+`git remote set-url origin https://chromium.googlesource.com/catapult`
 
 # Code style
 
@@ -104,16 +117,16 @@ Look to individual project documentation for more info on getting started:
 Check individual project documentation for instructions on how to run tests.
 You can also check the current status of our tests on the
 [waterfall](http://build.chromium.org/p/client.catapult/waterfall).
-Use the "commit" checkbox in rietveld to commit through the commit queue, which
-automatically runs all tests. Run the tests before committing with the
-"CQ dry run" link.
+Use the "Submit to CQ" button in Gerrit to commit through the commit queue,
+which automatically runs all tests. Run the tests before committing with the
+"CQ dry run" button.
 
 # Updating Chromium's about:tracing (rolling DEPS)
 
 Chromium's DEPS file needs to be rolled to the catapult revision containing your
 change in order for it to appear in Chrome's about:tracing or other
-third_party/catapult files. Follow the [directions for rolling DEPS]
-(/docs/rolling-deps.md) to do this.
+third_party/catapult files. Follow the [directions for rolling DEPS](/docs/rolling-deps.md)
+to do this.
 
 # Adding a new project
 

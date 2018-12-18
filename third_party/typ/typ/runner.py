@@ -39,6 +39,7 @@ if dir_above_typ not in sys.path:  # pragma: no cover
 
 from typ import json_results
 from typ.arg_parser import ArgumentParser
+from typ.expectations_parser import TestExpectations
 from typ.host import Host
 from typ.pool import make_pool
 from typ.stats import Stats
@@ -83,6 +84,11 @@ class TestSet(object):
         self.isolated_tests = promote(isolated_tests)
         self.tests_to_skip = promote(tests_to_skip)
 
+    def copy(self):
+        return TestSet(
+            self.parallel_tests[:], self.isolated_tests[:],
+            self.tests_to_skip[:])
+
 
 class WinMultiprocessing(object):
     ignore = 'ignore'
@@ -111,8 +117,11 @@ class Runner(object):
         self.stats = None
         self.teardown_fn = None
         self.top_level_dir = None
+        self.top_level_dirs = []
         self.win_multiprocessing = WinMultiprocessing.spawn
         self.final_responses = []
+        self.has_expectations = False
+        self.expectations = None
 
         # initialize self.args to the defaults.
         parser = ArgumentParser(self.host)
@@ -159,7 +168,7 @@ class Runner(object):
             return self._spawn(test_set)
 
         ret = self._set_up_runner()
-        if ret:  # pragma: no cover
+        if ret:
             return ret, None, None
 
         find_start = h.time()
@@ -175,7 +184,20 @@ class Runner(object):
         find_end = h.time()
 
         if not ret:
-            ret, full_results = self._run_tests(result_set, test_set)
+            self.stats.total = (len(test_set.parallel_tests) +
+                                len(test_set.isolated_tests) +
+                                len(test_set.tests_to_skip)) * self.args.repeat
+            all_tests = [ti.name for ti in
+            _sort_inputs(test_set.parallel_tests +
+                         test_set.isolated_tests +
+                         test_set.tests_to_skip)]
+            if self.args.list_only:
+                self.print_('\n'.join(all_tests))
+            else:
+                for _ in range(self.args.repeat):
+                    current_ret, full_results= self._run_tests(
+                        result_set, test_set.copy(), all_tests)
+                    ret = ret or current_ret
 
         if self.cov:  # pragma: no cover
             self.cov.stop()
@@ -289,24 +311,39 @@ class Runner(object):
         self.printer = Printer(
             self.print_, args.overwrite, args.terminal_width)
 
-        self.top_level_dir = args.top_level_dir
-        if not self.top_level_dir:
-            if args.tests and h.isdir(args.tests[0]):
-                # TODO: figure out what to do if multiple files are
-                # specified and they don't all have the same correct
-                # top level dir.
-                d = h.realpath(h.dirname(args.tests[0]))
-                if h.exists(d, '__init__.py'):
-                    top_dir = d
+        if self.args.top_level_dirs and self.args.top_level_dir:
+            self.print_(
+                'Cannot specify both --top-level-dir and --top-level-dirs',
+                stream=h.stderr)
+            return 1
+
+        self.top_level_dirs = args.top_level_dirs
+        if not self.top_level_dirs and args.top_level_dir:
+            self.top_level_dirs = [args.top_level_dir]
+
+        if not self.top_level_dirs:
+            for test in [t for t in args.tests if h.exists(t)]:
+                if h.isdir(test):
+                    top_dir = test
                 else:
-                    top_dir = args.tests[0]
-            else:
-                top_dir = h.getcwd()
+                    top_dir = h.dirname(test)
+                while h.exists(top_dir, '__init__.py'):
+                    top_dir = h.dirname(top_dir)
+                top_dir = h.realpath(top_dir)
+                if not top_dir in self.top_level_dirs:
+                    self.top_level_dirs.append(top_dir)
+        if not self.top_level_dirs:
+            top_dir = h.getcwd()
             while h.exists(top_dir, '__init__.py'):
                 top_dir = h.dirname(top_dir)
-            self.top_level_dir = h.realpath(top_dir)
+            top_dir = h.realpath(top_dir)
+            self.top_level_dirs.append(top_dir)
 
-        h.add_to_path(self.top_level_dir)
+        if not self.top_level_dir and self.top_level_dirs:
+            self.top_level_dir = self.top_level_dirs[0]
+
+        for path in self.top_level_dirs:
+            h.add_to_path(path)
 
         for path in args.path:
             h.add_to_path(path)
@@ -315,16 +352,45 @@ class Runner(object):
             try:
                 import coverage
             except ImportError:
-                h.print_("Error: coverage is not installed")
+                self.print_('Error: coverage is not installed.')
                 return 1
+
             source = self.args.coverage_source
             if not source:
-                source = [self.top_level_dir] + self.args.path
+                source = self.top_level_dirs + self.args.path
             self.coverage_source = source
             self.cov = coverage.coverage(source=self.coverage_source,
                                          data_suffix=True)
             self.cov.erase()
+
+        if args.expectations_files:
+            ret = self.parse_expectations()
+            if ret:
+                return ret
+        elif args.tags:
+            self.print_('Error: tags require expectations files.')
+            return 1
         return 0
+
+    def parse_expectations(self):
+        args = self.args
+
+        if len(args.expectations_files) != 1:
+            # TODO(crbug.com/835690): Fix this.
+            self.print_(
+                'Only a single expectation file is currently supported',
+                stream=self.host.stderr)
+            return 1
+        contents = self.host.read_text_file(args.expectations_files[0])
+
+        expectations = TestExpectations(set(args.tags))
+        err, msg = expectations.parse_tagged_list(contents)
+        if err:
+            self.print_(msg, stream=self.host.stderr)
+            return err
+
+        self.has_expectations = True
+        self.expectations = expectations
 
     def find_tests(self, args):
         test_set = TestSet()
@@ -342,10 +408,15 @@ class Runner(object):
             for name in names:
                 try:
                     self._add_tests_to_set(test_set, args.suffixes,
-                                           self.top_level_dir, classifier,
+                                           self.top_level_dirs, classifier,
                                            name)
                 except (AttributeError, ImportError, SyntaxError) as e:
-                    self.print_('Failed to load "%s": %s' % (name, e))
+                    ex_str = traceback.format_exc()
+                    self.print_('Failed to load "%s" in find_tests: %s' %
+                                (name, e))
+                    self.print_('  %s' %
+                                '\n  '.join(ex_str.splitlines()))
+                    self.print_(ex_str)
                     return 1, None
                 except _AddTestsError as e:
                     self.print_(str(e))
@@ -357,8 +428,8 @@ class Runner(object):
             total_shards = args.total_shards
             assert total_shards >= 1
             assert shard_index >= 0 and shard_index < total_shards, (
-              'shard_index (%d) must be >= 0 and < total_shards (%d)' %
-              (shard_index, total_shards))
+                'shard_index (%d) must be >= 0 and < total_shards (%d)' %
+                (shard_index, total_shards))
             test_set.parallel_tests = _sort_inputs(
                 test_set.parallel_tests)[shard_index::total_shards]
             test_set.isolated_tests = _sort_inputs(
@@ -380,48 +451,57 @@ class Runner(object):
                 s = self.host.read_text_file(args.file_list)
             names = [line.strip() for line in s.splitlines()]
         else:
-            names = [self.top_level_dir]
+            names = self.top_level_dirs
         return names
 
-    def _add_tests_to_set(self, test_set, suffixes, top_level_dir, classifier,
+    def _add_tests_to_set(self, test_set, suffixes, top_level_dirs, classifier,
                           name):
         h = self.host
         loader = self.loader
         add_tests = _test_adder(test_set, classifier)
 
-        if h.isfile(name):
-            rpath = h.relpath(name, top_level_dir)
-            if rpath.endswith('.py'):
-                rpath = rpath[:-3]
-            module = rpath.replace(h.sep, '.')
-            add_tests(loader.loadTestsFromName(module))
-        elif h.isdir(name):
-            for suffix in suffixes:
-                add_tests(loader.discover(name, suffix, top_level_dir))
-        else:
-            possible_dir = name.replace('.', h.sep)
-            if h.isdir(top_level_dir, possible_dir):
+        found = set()
+        for d in top_level_dirs:
+            if h.isfile(name):
+                rpath = h.relpath(name, d)
+                if rpath.startswith('..'):
+                    continue
+                if rpath.endswith('.py'):
+                    rpath = rpath[:-3]
+                module = rpath.replace(h.sep, '.')
+                if module not in found:
+                    found.add(module)
+                    add_tests(loader.loadTestsFromName(module))
+            elif h.isdir(name):
+                rpath = h.relpath(name, d)
+                if rpath.startswith('..'):
+                    continue
                 for suffix in suffixes:
-                    path = h.join(top_level_dir, possible_dir)
-                    suite = loader.discover(path, suffix, top_level_dir)
-                    add_tests(suite)
+                    if not name in found:
+                        found.add(name + '/' + suffix)
+                        add_tests(loader.discover(name, suffix, d))
             else:
-                add_tests(loader.loadTestsFromName(name))
+                possible_dir = name.replace('.', h.sep)
+                if h.isdir(d, possible_dir):
+                    for suffix in suffixes:
+                        path = h.join(d, possible_dir)
+                        if not path in found:
+                            found.add(path + '/' + suffix)
+                            suite = loader.discover(path, suffix, d)
+                            add_tests(suite)
+                elif not name in found:
+                    found.add(name)
+                    add_tests(loader.loadTestsFromName(name))
 
-    def _run_tests(self, result_set, test_set):
+        # pylint: disable=no-member
+        if hasattr(loader, 'errors') and loader.errors:  # pragma: python3
+            # In Python3's version of unittest, loader failures get converted
+            # into failed test cases, rather than raising exceptions. However,
+            # the errors also get recorded so you can err out immediately.
+            raise ImportError(loader.errors)
+
+    def _run_tests(self, result_set, test_set, all_tests):
         h = self.host
-        if not test_set.parallel_tests and not test_set.isolated_tests:
-            self.print_('No tests to run.')
-            return 1, None
-
-        all_tests = [ti.name for ti in
-                     _sort_inputs(test_set.parallel_tests +
-                                  test_set.isolated_tests +
-                                  test_set.tests_to_skip)]
-
-        if self.args.list_only:
-            self.print_('\n'.join(all_tests))
-            return 0, None
 
         self._run_one_set(self.stats, result_set, test_set)
 
@@ -461,9 +541,6 @@ class Runner(object):
                 full_results)
 
     def _run_one_set(self, stats, result_set, test_set):
-        stats.total = (len(test_set.parallel_tests) +
-                       len(test_set.isolated_tests) +
-                       len(test_set.tests_to_skip))
         self._skip_tests(stats, result_set, test_set.tests_to_skip)
         self._run_list(stats, result_set,
                        test_set.parallel_tests, self.args.jobs)
@@ -545,6 +622,9 @@ class Runner(object):
 
         if result.unexpected:
             result_str += ' unexpectedly'
+        elif result.actual == ResultType.Failure:
+            result_str += ' as expected'
+
         if self.args.timing:
             timing_str = ' %.4fs' % result.took
         else:
@@ -580,8 +660,9 @@ class Runner(object):
         self.printer.flush()
 
     def _summarize(self, full_results):
-        num_tests = self.stats.finished
+        num_passes = json_results.num_passes(full_results)
         num_failures = json_results.num_failures(full_results)
+        num_skips = json_results.num_skips(full_results)
 
         if self.args.quiet and num_failures == 0:
             return
@@ -591,10 +672,11 @@ class Runner(object):
                                            self.stats.started_time)
         else:
             timing_clause = ''
-        self.update('%d test%s run%s, %d failure%s.' %
-                    (num_tests,
-                     '' if num_tests == 1 else 's',
+        self.update('%d test%s passed%s, %d skipped, %d failure%s.' %
+                    (num_passes,
+                     '' if num_passes == 1 else 's',
                      timing_clause,
+                     num_skips,
                      num_failures,
                      '' if num_failures == 1 else 's'), elide=False)
         self.print_()
@@ -744,8 +826,11 @@ class _Child(object):
         self.teardown_fn = parent.teardown_fn
         self.context_after_setup = None
         self.top_level_dir = parent.top_level_dir
+        self.top_level_dirs = parent.top_level_dirs
         self.loaded_suites = {}
         self.cov = None
+        self.has_expectations = parent.has_expectations
+        self.expectations = parent.expectations
 
 
 def _setup_process(host, worker_num, child):
@@ -788,7 +873,7 @@ def _run_one_test(child, test_input):
     pid = h.getpid()
     test_name = test_input.name
 
-    start = h.time()
+    started = h.time()
 
     # It is important to capture the output before loading the test
     # to ensure that
@@ -798,37 +883,52 @@ def _run_one_test(child, test_input):
     # This comes up when using the FakeTestLoader and testing typ itself,
     # but could come up when testing non-typ code as well.
     h.capture_output(divert=not child.passthrough)
+    if child.has_expectations:
+      expected_results = child.expectations.expected_results_for(test_name)
+    else:
+      expected_results = {ResultType.Pass}
 
-    tb_str = ''
+    ex_str = ''
     try:
         orig_skip = unittest.skip
         orig_skip_if = unittest.skipIf
         if child.all:
             unittest.skip = lambda reason: lambda x: x
             unittest.skipIf = lambda condition, reason: lambda x: x
+        elif ResultType.Skip in expected_results:
+            # TODO: Should these have been added to tests_to_skip up
+            # in find_tests() and run() instead, so that we'd never actually
+            # get here with a test we wanted to skip?
+            h.restore_output()
+            return Result(test_name, ResultType.Skip, started, 0,
+                          child.worker_num, unexpected=False, pid=pid)
 
         try:
             suite = child.loader.loadTestsFromName(test_name)
         except Exception as e:
+            ex_str = ('loadTestsFromName("%s") failed: %s\n%s\n' %
+                      (test_name, e, traceback.format_exc()))
             try:
                 suite = _load_via_load_tests(child, test_name)
+                ex_str += ('\nload_via_load_tests(\"%s\") returned %d tests\n' %
+                           (test_name, len(list(suite))))
             except Exception as e:  # pragma: untested
                 suite = []
-                tb_str = traceback.format_exc(e)
+                ex_str += ('\nload_via_load_tests("%s") failed: %s\n%s\n' %
+                           (test_name, e, traceback.format_exc()))
     finally:
         unittest.skip = orig_skip
         unittest.skipIf = orig_skip_if
 
     tests = list(suite)
     if len(tests) != 1:
-        err = 'Failed to load %s' % test_name
-        if tb_str:  # pragma: untested
-            err += (' (traceback follows):\n  %s' %
-                    '  \n'.join(tb_str.splitlines()))
+        err = 'Failed to load "%s" in run_one_test' % test_name
+        if ex_str:  # pragma: untested
+            err += '\n  ' + '\n  '.join(ex_str.splitlines())
 
         h.restore_output()
-        return Result(test_name, ResultType.Failure, start, 0,
-                      child.worker_num, unexpected=True, code=1,
+        return Result(test_name, ResultType.Failure, started, took=0,
+                      worker=child.worker_num, unexpected=True, code=1,
                       err=err, pid=pid)
 
     test_case = tests[0]
@@ -849,9 +949,10 @@ def _run_one_test(child, test_input):
     finally:
         out, err = h.restore_output()
 
-    took = h.time() - start
-    return _result_from_test_result(test_result, test_name, start, took, out,
-                                    err, child.worker_num, pid)
+    took = h.time() - started
+    return _result_from_test_result(test_result, test_name, started, took, out,
+                                    err, child.worker_num, pid,
+                                    expected_results, child.has_expectations)
 
 
 def _run_under_debugger(host, test_case, suite,
@@ -865,46 +966,44 @@ def _run_under_debugger(host, test_case, suite,
     dbg.runcall(suite.run, test_result)
 
 
-def _result_from_test_result(test_result, test_name, start, took, out, err,
-                             worker_num, pid):
-    flaky = False
+def _result_from_test_result(test_result, test_name, started, took, out, err,
+                             worker_num, pid, expected_results,
+                             has_expectations):
     if test_result.failures:
-        expected = [ResultType.Pass]
         actual = ResultType.Failure
         code = 1
-        unexpected = True
         err = err + test_result.failures[0][1]
+        unexpected = actual not in expected_results
     elif test_result.errors:
-        expected = [ResultType.Pass]
         actual = ResultType.Failure
         code = 1
-        unexpected = True
         err = err + test_result.errors[0][1]
+        unexpected = actual not in expected_results
     elif test_result.skipped:
-        expected = [ResultType.Skip]
         actual = ResultType.Skip
         err = err + test_result.skipped[0][1]
         code = 0
-        unexpected = False
+        if has_expectations:
+            unexpected = actual not in expected_results
+        else:
+            unexpected = False
     elif test_result.expectedFailures:
-        expected = [ResultType.Failure]
         actual = ResultType.Failure
         code = 1
         err = err + test_result.expectedFailures[0][1]
         unexpected = False
     elif test_result.unexpectedSuccesses:
-        expected = [ResultType.Failure]
         actual = ResultType.Pass
         code = 0
         unexpected = True
     else:
-        expected = [ResultType.Pass]
         actual = ResultType.Pass
         code = 0
-        unexpected = False
+        unexpected = actual not in expected_results
 
-    return Result(test_name, actual, start, took, worker_num,
-                  expected, unexpected, flaky, code, out, err, pid)
+    flaky = False
+    return Result(test_name, actual, started, took, worker_num,
+                  expected_results, unexpected, flaky, code, out, err, pid)
 
 
 def _load_via_load_tests(child, test_name):
@@ -931,7 +1030,7 @@ def _load_via_load_tests(child, test_name):
         if suite:
             for test_case in suite:
                 assert isinstance(test_case, unittest.TestCase)
-                if test_case.id() == test_name:
+                if test_case.id() == test_name:  # pragma: untested
                     new_suite.addTest(test_case)
                     break
         comps.pop()

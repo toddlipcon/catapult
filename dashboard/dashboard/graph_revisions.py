@@ -16,11 +16,14 @@ long time. This module also provides a function for updating the cache.
 
 import bisect
 import json
+import math
 
-from dashboard import datastore_hooks
-from dashboard import namespaced_stored_object
-from dashboard import request_handler
-from dashboard import utils
+from google.appengine.ext import ndb
+
+from dashboard.common import datastore_hooks
+from dashboard.common import namespaced_stored_object
+from dashboard.common import request_handler
+from dashboard.common import utils
 from dashboard.models import graph_data
 
 _CACHE_KEY = 'num_revisions_%s'
@@ -42,9 +45,19 @@ class GraphRevisionsHandler(request_handler.RequestHandler):
     rows = namespaced_stored_object.Get(_CACHE_KEY % test_path)
     if not rows:
       rows = _UpdateCache(utils.TestKey(test_path))
+
+    # TODO(simonhatch): Need to filter out NaN values.
+    # https://github.com/catapult-project/catapult/issues/3474
+    def _NaNtoNone(x):
+      if math.isnan(x):
+        return None
+      return x
+    rows = [
+        (_NaNtoNone(r[0]), _NaNtoNone(r[1]), _NaNtoNone(r[2])) for r in rows]
     self.response.out.write(json.dumps(rows))
 
 
+@ndb.synctasklet
 def SetCache(test_path, rows):
   """Sets the saved graph revisions data for a test.
 
@@ -52,20 +65,35 @@ def SetCache(test_path, rows):
     test_path: A test path string.
     rows: A list of [revision, value, timestamp] triplets.
   """
+  yield SetCacheAsync(test_path, rows)
+
+
+@ndb.tasklet
+def SetCacheAsync(test_path, rows):
   # This first set generally only sets the internal-only cache.
-  namespaced_stored_object.Set(_CACHE_KEY % test_path, rows)
+  futures = [namespaced_stored_object.SetAsync(_CACHE_KEY % test_path, rows)]
 
   # If this is an internal_only query for externally available data,
   # set the cache for that too.
   if datastore_hooks.IsUnalteredQueryPermitted():
     test = utils.TestKey(test_path).get()
     if test and not test.internal_only:
-      namespaced_stored_object.SetExternal(_CACHE_KEY % test_path, rows)
+      futures.append(
+          namespaced_stored_object.SetExternalAsync(
+              _CACHE_KEY % test_path, rows))
+  yield futures
 
 
+@ndb.synctasklet
 def DeleteCache(test_path):
   """Removes any saved data for the given path."""
-  namespaced_stored_object.Delete(_CACHE_KEY % test_path)
+  yield DeleteCacheAsync(test_path)
+
+
+@ndb.tasklet
+def DeleteCacheAsync(test_path):
+  """Removes any saved data for the given path."""
+  yield namespaced_stored_object.DeleteAsync(_CACHE_KEY % test_path)
 
 
 def _UpdateCache(test_key):
@@ -104,6 +132,7 @@ def _MakeTriplet(row):
   return [row.revision, row.value, timestamp]
 
 
+@ndb.synctasklet
 def AddRowsToCache(row_entities):
   """Adds a list of rows to the cache, in revision order.
 
@@ -112,6 +141,23 @@ def AddRowsToCache(row_entities):
   Args:
     row_entities: List of Row entities.
   """
+  yield AddRowsToCacheAsync(row_entities)
+
+
+@ndb.tasklet
+def AddRowsToCacheAsync(row_entities):
+  test_key_to_futures = {}
+  for row in row_entities:
+    test_key = row.parent_test
+    if test_key in test_key_to_futures:
+      continue
+
+    test_path = utils.TestPath(test_key)
+    test_key_to_futures[test_key] = namespaced_stored_object.GetAsync(
+        _CACHE_KEY % test_path)
+
+  yield test_key_to_futures.values()
+
   test_key_to_rows = {}
   for row in row_entities:
     test_key = row.parent_test
@@ -119,7 +165,8 @@ def AddRowsToCache(row_entities):
       graph_rows = test_key_to_rows[test_key]
     else:
       test_path = utils.TestPath(test_key)
-      graph_rows = namespaced_stored_object.Get(_CACHE_KEY % test_path)
+      graph_rows_future = test_key_to_futures.get(test_key)
+      graph_rows = graph_rows_future.get_result()
       if not graph_rows:
         # We only want to update caches for tests that people have looked at.
         continue
@@ -132,6 +179,8 @@ def AddRowsToCache(row_entities):
         return  # Already in cache.
     graph_rows.insert(index, _MakeTriplet(row))
 
+  futures = []
   for test_key in test_key_to_rows:
     graph_rows = test_key_to_rows[test_key]
-    SetCache(utils.TestPath(test_key), graph_rows)
+    futures.append(SetCacheAsync(utils.TestPath(test_key), graph_rows))
+  yield futures

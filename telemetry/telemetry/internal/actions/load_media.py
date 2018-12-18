@@ -26,8 +26,9 @@ class LoadMediaAction(media_action.MediaAction):
 
   def RunAction(self, tab):
     try:
-      tab.ExecuteJavaScript('window.__loadMediaAndAwait("%s", "%s");'
-                            % (self._selector, self._event_to_await))
+      tab.ExecuteJavaScript(
+          'window.__loadMediaAndAwait({{ selector }}, {{ event }});',
+          selector=self._selector, event=self._event_to_await)
       if self._timeout_in_seconds > 0:
         self.WaitForEvent(tab, self._selector, self._event_to_await,
                           self._timeout_in_seconds)
@@ -35,3 +36,6 @@ class LoadMediaAction(media_action.MediaAction):
       raise page_action.PageActionFailed('Failed waiting for event "%s" on '
                                          'elements with selector = %s.' %
                                          (self._event_to_await, self._selector))
+
+  def __str__(self):
+    return "%s(%s)" % (self.__class__.__name__, self._selector)

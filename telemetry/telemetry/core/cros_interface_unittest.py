@@ -13,7 +13,6 @@ import mock
 
 from telemetry.core import cros_interface
 from telemetry import decorators
-from telemetry.internal import forwarders
 from telemetry.internal.forwarders import cros_forwarder
 from telemetry.testing import options_for_unittests
 
@@ -62,17 +61,17 @@ class CrOSInterfaceTest(unittest.TestCase):
   @decorators.Enabled('chromeos')
   def testGetFileNonExistent(self):
     with self._GetCRI() as cri:
-      f = tempfile.NamedTemporaryFile()
-      cri.PushContents('testGetFileNonExistent', f.name)
-      cri.RmRF(f.name)
-      self.assertRaises(OSError, lambda: cri.GetFile(f.name))
+      f = '/tmp/testGetFile'  # A path that can be created on the device.
+      cri.PushContents('testGetFileNonExistent', f)
+      cri.RmRF(f)
+      self.assertRaises(OSError, lambda: cri.GetFile(f))
 
   @decorators.Enabled('chromeos')
   def testIsServiceRunning(self):
     with self._GetCRI() as cri:
       self.assertTrue(cri.IsServiceRunning('openssh-server'))
 
-  # TODO(achuith): Fix this test. crbug.com/619767.
+  # TODO(crbug.com/799484): Fix this test.
   @decorators.Disabled('all')
   def testGetRemotePortAndIsHTTPServerRunningOnPort(self):
     with self._GetCRI() as cri:
@@ -88,9 +87,7 @@ class CrOSInterfaceTest(unittest.TestCase):
 
       # Forward local server's port to remote device's remote_port.
       forwarder = cros_forwarder.CrOsForwarderFactory(cri).Create(
-          forwarders.PortPairs(http=forwarders.PortPair(port, remote_port),
-                               https=None,
-                               dns=None))
+          local_port=port, remote_port=remote_port)
 
       # At this point, remote device should be able to connect to local server.
       self.assertTrue(cri.IsHTTPServerRunningOnPort(remote_port))
@@ -169,7 +166,8 @@ class CrOSInterfaceTest(unittest.TestCase):
     cri = cros_interface.CrOSInterface(
         "testhostname", 22, options_for_unittests.GetCopy().cros_ssh_identity)
     cri.TryLogin()
-    mock_run_cmd.assert_called_once_with(['echo', '$USER'], quiet=True)
+    mock_run_cmd.assert_called_once_with(
+        ['echo', '$USER'], quiet=True, connect_timeout=60)
 
   @decorators.Enabled('chromeos')
   @mock.patch.object(cros_interface.CrOSInterface, 'RunCmdOnDevice')
@@ -214,3 +212,44 @@ class CrOSInterfaceTest(unittest.TestCase):
     self.assertRaisesRegexp(cros_interface.LoginException,
                             r'Logged into .*, expected \$USER=root, but got .*',
                             cri.TryLogin)
+
+  @decorators.Enabled('chromeos')
+  @mock.patch.object(cros_interface.CrOSInterface, 'RunCmdOnDevice')
+  def testIsCryptohomeMounted(self, mock_run_cmd):
+    # The device's mount state is checked by the command
+    #   /bin/df --someoption `cryptohome-path user $username`.
+    # The following mock replaces RunCmdOnDevice() to return mocked mount states
+    # from the command execution.
+    def mockRunCmdOnDevice(args): # pylint: disable=invalid-name
+      if args[0] == 'cryptohome-path':
+        return ('/home/user/%s' % args[2], '')
+      elif args[0] == '/bin/df':
+        if 'unmount' in args[2]:
+          # For the user unmount@gmail.com, returns the unmounted state.
+          source, target = '/dev/sda1', '/home'
+        elif 'ephemeral_mount' in args[2]:
+          # For ephemeral mount, returns no mount.
+          # TODO(poromov): Add test for ephemeral mount.
+          return ('df %s: No such file or directory\n' % (args[2]), '')
+        elif 'mount' in args[2]:
+          # For the user mount@gmail.com, returns the mounted state.
+          source, target = '/dev/sda1', args[2]
+        elif 'guest' in args[2]:
+          # For the user $guest, returns the guest-mounted state.
+          source, target = 'guestfs', args[2]
+        return ('Filesystem Mounted on\n%s %s\n' % (source, target), '')
+    mock_run_cmd.side_effect = mockRunCmdOnDevice
+
+    cri = cros_interface.CrOSInterface(
+        "testhostname", 22, options_for_unittests.GetCopy().cros_ssh_identity)
+    # Returns False if the user's cryptohome is not mounted.
+    self.assertFalse(cri.IsCryptohomeMounted('unmount@gmail.com', False))
+    # Returns True if the user's cryptohome is mounted.
+    self.assertTrue(cri.IsCryptohomeMounted('mount@gmail.com', False))
+    # Returns True if the guest cryptohome is mounted.
+    self.assertTrue(cri.IsCryptohomeMounted('$guest', True))
+    # Sanity check. Returns False if the |is_guest| parameter does not match
+    # with whether or not the user is really a guest.
+    self.assertFalse(cri.IsCryptohomeMounted('unmount@gmail.com', True))
+    self.assertFalse(cri.IsCryptohomeMounted('mount@gmail.com', True))
+    self.assertFalse(cri.IsCryptohomeMounted('$guest', False))

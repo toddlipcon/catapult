@@ -11,6 +11,7 @@ import contextlib
 import csv
 import logging
 
+from devil.android import crash_handler
 from devil.android import decorators
 from devil.android import device_errors
 from devil.android import device_utils
@@ -140,6 +141,18 @@ _DEVICE_PROFILES = [
     'voltage': '/sys/class/power_supply/max77843-fuelgauge/voltage_now',
     'current': '/sys/class/power_supply/max77843-charger/current_now',
   },
+  { # Cherry Mobile One
+    'name': ['W6210 (4560MMX_b fingerprint)'],
+    'enable_command': (
+        'echo "0 0" > /proc/mtk_battery_cmd/current_cmd && '
+        'dumpsys battery reset'),
+    'disable_command': (
+        'echo "0 1" > /proc/mtk_battery_cmd/current_cmd && '
+        'dumpsys battery set ac 0 && dumpsys battery set usb 0'),
+    'charge_counter': None,
+    'voltage': None,
+    'current': None,
+},
 ]
 
 # The list of useful dumpsys columns.
@@ -362,7 +375,12 @@ class BatteryUtils(object):
     Returns:
       True if the device is charging, false otherwise.
     """
-    battery_info = self.GetBatteryInfo()
+    # Wrapper function so that we can use `RetryOnSystemCrash`.
+    def GetBatteryInfoHelper(device):
+      return self.GetBatteryInfo()
+
+    battery_info = crash_handler.RetryOnSystemCrash(
+        GetBatteryInfoHelper, self._device)
     for k in ('AC powered', 'USB powered', 'Wireless powered'):
       if (k in battery_info and
           battery_info[k].lower() in ('true', '1', 'yes')):
@@ -602,7 +620,7 @@ class BatteryUtils(object):
       return self.GetCharging() == enabled
 
     self._device.RunShellCommand(
-        command, check_return=True, as_root=True, large_output=True)
+        command, shell=True, check_return=True, as_root=True, large_output=True)
     timeout_retry.WaitFor(verify_charging, wait_period=1)
 
   @contextlib.contextmanager

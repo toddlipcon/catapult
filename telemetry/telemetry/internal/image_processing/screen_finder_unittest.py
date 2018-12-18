@@ -7,6 +7,7 @@ import math
 import os
 import unittest
 
+from telemetry import decorators
 from telemetry.core import util
 from telemetry.internal.util import external_modules
 
@@ -32,6 +33,7 @@ else:
       self.ScreenFinder = screen_finder.ScreenFinder
 
     def _GetScreenFinder(self, video_filename):
+      # pylint: disable=redefined-variable-type
       if not video_filename:
         fg = self.FakeFrameGenerator()
       else:
@@ -39,6 +41,9 @@ else:
         fg = self.VideoFileFrameGenerator(vid)
       return self.ScreenFinder(fg)
 
+    # https://github.com/catapult-project/catapult/issues/3510
+    @decorators.Disabled('all')
+    @decorators.Isolated
     def testBasicFunctionality(self):
       def CheckCorners(corners, expected):
         for i in xrange(len(corners)):
@@ -206,8 +211,8 @@ else:
       cd_list.append(self.ScreenFinder.CornerData(1, None, None, None, None))
       cd_list.append(self.ScreenFinder.CornerData(2, None, None, None, None))
       cd_list.sort()
-      for i in range(len(cd_list)):
-        self.assertEqual(i, cd_list[i].corner_index)
+      for i, cd in enumerate(cd_list):
+        self.assertEqual(i, cd.corner_index)
 
     def testFindCorners(self):
       # TODO: Probably easier to just do end to end tests.

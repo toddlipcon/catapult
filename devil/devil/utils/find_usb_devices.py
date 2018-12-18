@@ -3,13 +3,22 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import argparse
+import logging
+import os
 import re
 import sys
-import argparse
+
+if __name__ == '__main__':
+  sys.path.append(
+      os.path.abspath(os.path.join(os.path.dirname(__file__),
+                                   '..', '..')))
 
 from devil.utils import cmd_helper
 from devil.utils import usb_hubs
 from devil.utils import lsusb
+
+logger = logging.getLogger(__name__)
 
 # Note: In the documentation below, "virtual port" refers to the port number
 # as observed by the system (e.g. by usb-devices) and "physical port" refers
@@ -183,9 +192,9 @@ class USBDeviceNode(USBNode):
 
   #override
   def Display(self, port_chain='', info=False):
-    print '%s Device %d (%s)' % (port_chain, self.device_num, self.desc)
+    logger.info('%s Device %d (%s)', port_chain, self.device_num, self.desc)
     if info:
-      print self.info
+      logger.info('%s', self.info)
     for (port, device) in self._port_to_node.iteritems():
       device.Display('%s%d:' % (port_chain, port), info=info)
 
@@ -229,7 +238,7 @@ class USBBusNode(USBNode):
 
   #override
   def Display(self, port_chain='', info=False):
-    print "=== %s ===" % self.desc
+    logger.info('=== %s ===', self.desc)
     for (port, device) in self._port_to_node.iteritems():
       device.Display('%s%d:' % (port_chain, port), info=info)
 
@@ -443,9 +452,9 @@ def GetBusDeviceFromTTY(tty_string):
   for line in _GetTtyUSBInfo(tty_string).splitlines():
     bus_match = _BUS_NUM_REGEX.match(line)
     device_match = _DEVICE_NUM_REGEX.match(line)
-    if bus_match and bus_num == None:
+    if bus_match and bus_num is None:
       bus_num = int(bus_match.group(1))
-    if device_match and device_num == None:
+    if device_match and device_num is None:
       device_num = int(device_match.group(1))
   if bus_num is None or device_num is None:
     raise ValueError('Info not found')
@@ -477,29 +486,34 @@ def GetBusDeviceToTTYMap():
 
 def TestUSBTopologyScript():
   """Test display and hub identification."""
+  # The following makes logger.info behave pretty much like print
+  # during this test script.
+  logging.basicConfig(format='%(message)s', stream=sys.stdout)
+  logger.setLevel(logging.INFO)
+
   # Identification criteria for Plugable 7-Port Hub
-  print '==== USB TOPOLOGY SCRIPT TEST ===='
+  logger.info('==== USB TOPOLOGY SCRIPT TEST ====')
+  logger.info('')
 
   # Display devices
-  print '==== DEVICE DISPLAY ===='
+  logger.info('==== DEVICE DISPLAY ====')
   device_trees = GetBusNumberToDeviceTreeMap()
   for device_tree in device_trees.values():
     device_tree.Display()
-  print
+  logger.info('')
 
   # Display TTY information about devices plugged into hubs.
-  print '==== TTY INFORMATION ===='
+  logger.info('==== TTY INFORMATION ====')
   for port_map in GetAllPhysicalPortToTTYMaps(
       usb_hubs.ALL_HUBS, device_tree_map=device_trees):
-    print port_map
-  print
+    logger.info('%s', port_map)
+  logger.info('')
 
   # Display serial number information about devices plugged into hubs.
-  print '==== SERIAL NUMBER INFORMATION ===='
+  logger.info('==== SERIAL NUMBER INFORMATION ====')
   for port_map in GetAllPhysicalPortToSerialMaps(
       usb_hubs.ALL_HUBS, device_tree_map=device_trees):
-    print port_map
-
+    logger.info('%s', port_map)
 
   return 0
 

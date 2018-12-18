@@ -2,14 +2,14 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import copy
 import json
 
 import webapp2
 import webtest
 
 from dashboard import post_bisect_results
-from dashboard import rietveld_service
-from dashboard import testing_common
+from dashboard.common import testing_common
 from dashboard.models import try_job
 
 _SAMPLE_BISECT_RESULTS_JSON = {
@@ -70,21 +70,6 @@ class PostBisectResultsTest(testing_common.TestCase):
          post_bisect_results.PostBisectResultsHandler)])
     self.testapp = webtest.TestApp(app)
     testing_common.SetIpWhitelist([_WHITELISTED_IP])
-    self._AddRietveldConfig()
-
-  def _AddRietveldConfig(self):
-    """Adds a RietveldConfig entity to the datastore.
-
-    This is used in order to get the Rietveld URL when requests are made to the
-    handler in te tests below. In the real datastore, the RietveldConfig entity
-    would contain credentials.
-    """
-    rietveld_service.RietveldConfig(
-        id='default_rietveld_config',
-        client_email='sullivan@email.com',
-        service_account_key='Fake Account Key',
-        server_url='https://test-rietveld.appspot.com',
-        internal_server_url='https://test-rietveld.appspot.com').put()
 
   def testPost(self):
     job_key = try_job.TryJob(id=6789, rietveld_issue_id=200034).put()
@@ -96,3 +81,17 @@ class PostBisectResultsTest(testing_common.TestCase):
     job = job_key.get()
     self.assertEqual(6789, job.results_data['try_job_id'])
     self.assertEqual('completed', job.results_data['status'])
+
+  def testPost_InProgress(self):
+    job_key = try_job.TryJob(id=6790, rietveld_issue_id=200035, bug_id=10).put()
+    data = copy.deepcopy(_SAMPLE_BISECT_RESULTS_JSON)
+    data['status'] = 'started'
+    data['try_job_id'] = 6790
+    data_param = json.dumps(data)
+    self.testapp.post(
+        '/post_bisect_results', {'data': data_param},
+        extra_environ={'REMOTE_ADDR': _WHITELISTED_IP})
+
+    job = job_key.get()
+    self.assertEqual(6790, job.results_data['try_job_id'])
+    self.assertEqual('started', job.results_data['status'])

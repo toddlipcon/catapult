@@ -17,16 +17,16 @@ class HistogramValueBucket(object):
 
   def AsDict(self):
     return {
-      'low': self.low,
-      'high': self.high,
-      'count': self.count
+        'low': self.low,
+        'high': self.high,
+        'count': self.count
     }
 
   def ToJSONString(self):
     return '{%s}' % ', '.join([
-      '"low": %i' % self.low,
-      '"high": %i' % self.high,
-      '"count": %i' % self.count])
+        '"low": %i' % self.low,
+        '"high": %i' % self.high,
+        '"count": %i' % self.count])
 
 class HistogramValue(summarizable.SummarizableValue):
   def __init__(self, page, name, units,
@@ -37,22 +37,22 @@ class HistogramValue(summarizable.SummarizableValue):
                                          description, tir_label,
                                          improvement_direction, grouping_keys)
     if raw_value_json:
-      assert raw_value == None, \
+      assert raw_value is None, \
              'Don\'t specify both raw_value and raw_value_json'
       raw_value = json.loads(raw_value_json)
     if raw_value:
       self.buckets = []
       for bucket in histogram_util.GetHistogramBucketsFromRawValue(raw_value):
         self.buckets.append(HistogramValueBucket(
-          low=bucket['low'],
-          high=bucket['high'],
-          count=bucket['count']))
+            low=bucket['low'],
+            high=bucket['high'],
+            count=bucket['count']))
     else:
       self.buckets = []
 
   def __repr__(self):
     if self.page:
-      page_name = self.page.display_name
+      page_name = self.page.name
     else:
       page_name = 'None'
     return ('HistogramValue(%s, %s, %s, raw_json_string=%s, '
@@ -87,7 +87,7 @@ class HistogramValue(summarizable.SummarizableValue):
     #
     # Sigh, buildbot, Y U gotta be that way.
     return '{"buckets": [%s]}' % (
-      ', '.join([b.ToJSONString() for b in self.buckets]))
+        ', '.join([b.ToJSONString() for b in self.buckets]))
 
   def GetRepresentativeNumber(self):
     (mean, _) = perf_tests_helper.GeomMeanAndStdDevFromHistogram(

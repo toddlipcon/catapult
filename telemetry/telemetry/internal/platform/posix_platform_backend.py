@@ -2,7 +2,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import distutils.spawn
+# pylint: disable=import-error
+# pylint: disable=no-name-in-module
+import distutils.spawn as spawn
 import logging
 import os
 import re
@@ -67,7 +69,7 @@ class PosixPlatformBackend(desktop_platform_backend.DesktopPlatformBackend):
     """
     args = ['top']
     args.extend(['-pid', str(pid), '-l', '1', '-s', '0', '-stats',
-        ','.join(columns)])
+                 ','.join(columns)])
     return self.RunCommand(args).splitlines()
 
   def GetChildPids(self, pid):
@@ -87,7 +89,7 @@ class PosixPlatformBackend(desktop_platform_backend.DesktopPlatformBackend):
     return command[0] if command else None
 
   def CanLaunchApplication(self, application):
-    return bool(distutils.spawn.find_executable(application))
+    return bool(spawn.find_executable(application))
 
   def IsApplicationRunning(self, application):
     ps_output = self.GetPsOutput(['command'])
@@ -100,7 +102,7 @@ class PosixPlatformBackend(desktop_platform_backend.DesktopPlatformBackend):
     assert application, 'Must specify application to launch'
 
     if os.path.sep not in application:
-      application = distutils.spawn.find_executable(application)
+      application = spawn.find_executable(application)
       assert application, 'Failed to find application in path'
 
     args = [application]
@@ -135,11 +137,12 @@ class PosixPlatformBackend(desktop_platform_backend.DesktopPlatformBackend):
           # that is rarely relevant), there's no way to prompt the user for
           # sudo. Fail with a helpful error message. For more information, see:
           #   https://code.google.com/p/chromium/issues/detail?id=426720
-          text = ('Telemetry needs to run %s with elevated privileges, but the '
-                 'setuid bit is not set and there is no interactive terminal '
-                 'for a prompt. Please ask an administrator to set the setuid '
-                 'bit on this executable and ensure that it is owned by a user '
-                 'with the necessary privileges. Aborting.' % application)
+          text = (
+              'Telemetry needs to run %s with elevated privileges, but the '
+              'setuid bit is not set and there is no interactive terminal '
+              'for a prompt. Please ask an administrator to set the setuid '
+              'bit on this executable and ensure that it is owned by a user '
+              'with the necessary privileges. Aborting.' % application)
           print text
           raise Exception(text)
         # Else, there is a tty that can be used for a useful interactive prompt.

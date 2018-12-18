@@ -10,24 +10,19 @@ https://code.google.com/p/trace-viewer/
 import logging
 from operator import attrgetter
 
-from telemetry.timeline import async_slice as async_slice_module
 from telemetry.timeline import bounds
 from telemetry.timeline import event_container
 from telemetry.timeline import inspector_importer
 from telemetry.timeline import process as process_module
-from telemetry.timeline import slice as slice_module
-from telemetry.timeline import surface_flinger_importer
-from telemetry.timeline import tab_id_importer
-from telemetry.timeline import trace_data as trace_data_module
 from telemetry.timeline import trace_event_importer
+from tracing.trace_data import trace_data as trace_data_module
+
 
 # Register importers for data
 
 _IMPORTERS = [
     inspector_importer.InspectorTimelineImporter,
-    tab_id_importer.TabIdImporter,
-    trace_event_importer.TraceEventTimelineImporter,
-    surface_flinger_importer.SurfaceFlingerTimelineImporter
+    trace_event_importer.TraceEventTimelineImporter
 ]
 
 
@@ -41,12 +36,6 @@ class MarkerOverlapError(Exception):
   def __init__(self):
     super(MarkerOverlapError, self).__init__(
         'Overlapping timeline markers found')
-
-
-def IsSliceOrAsyncSlice(t):
-  if t == async_slice_module.AsyncSlice:
-    return True
-  return t == slice_module.Slice
 
 
 class TimelineModel(event_container.TimelineEventContainer):
@@ -66,7 +55,6 @@ class TimelineModel(event_container.TimelineEventContainer):
     self._gpu_process = None
     self._surface_flinger_process = None
     self._frozen = False
-    self._tab_ids_to_renderer_threads_map = {}
     self.import_errors = []
     self.metadata = []
     self.flow_events = []
@@ -130,12 +118,6 @@ class TimelineModel(event_container.TimelineEventContainer):
   def surface_flinger_process(self, surface_flinger_process):
     self._surface_flinger_process = surface_flinger_process
 
-  def AddMappingFromTabIdToRendererThread(self, tab_id, renderer_thread):
-    if self._frozen:
-      raise Exception('Cannot add mapping from tab id to renderer thread once '
-                      'trace is imported')
-    self._tab_ids_to_renderer_threads_map[tab_id] = renderer_thread
-
   def ImportTraces(self, trace_data, shift_world_to_zero=True):
     """Populates the model with the provided trace data.
 
@@ -153,12 +135,10 @@ class TimelineModel(event_container.TimelineEventContainer):
     for importer in importers:
       # TODO: catch exceptions here and add it to error list
       importer.ImportEvents()
-    for record in trace_data.metadata_records:
-      self.metadata.append(record)
     self.FinalizeImport(shift_world_to_zero, importers)
 
   def FinalizeImport(self, shift_world_to_zero=False, importers=None):
-    if importers == None:
+    if importers is None:
       importers = []
     self.UpdateBounds()
     if not self.bounds.is_empty:
@@ -218,25 +198,12 @@ class TimelineModel(event_container.TimelineEventContainer):
     raise an error.
     """
     # Make sure names are in a list and remove all None names
-    if not isinstance(timeline_marker_names, list):
+    if isinstance(timeline_marker_names, basestring):
       timeline_marker_names = [timeline_marker_names]
     names = [x for x in timeline_marker_names if x is not None]
 
     # Gather all events that match the names and sort them.
-    events = []
-    name_set = set()
-    for name in names:
-      name_set.add(name)
-
-    def IsEventNeeded(event):
-      if event.parent_slice != None:
-        return
-      return event.name in name_set
-
-    events = list(self.IterAllEvents(
-      recursive=True,
-      event_type_predicate=IsSliceOrAsyncSlice,
-      event_predicate=IsEventNeeded))
+    events = list(self.IterTimelineMarkers(names))
     events.sort(key=attrgetter('start'))
 
     # Check if the number and order of events matches the provided names,
@@ -253,14 +220,29 @@ class TimelineModel(event_container.TimelineEventContainer):
 
     return events
 
-  def GetRendererProcessFromTabId(self, tab_id):
-    renderer_thread = self.GetRendererThreadFromTabId(tab_id)
-    if renderer_thread:
-      return renderer_thread.parent
-    return None
+  def GetFirstRendererProcess(self, tab_id):
+    """Find the process for the first renderer thread in the model."""
+    return self.GetFirstRendererThread(tab_id).parent
 
-  def GetRendererThreadFromTabId(self, tab_id):
-    return self._tab_ids_to_renderer_threads_map.get(tab_id, None)
+  def GetFirstRendererThread(self, tab_id):
+    """Find the first renderer thread in the model for an expected tab
+
+    This normally corresponds to the foreground tab at the time when the trace
+    was collected.
+
+    Args:
+      tab_id: To make sure clients have gotten the correct renderer for an
+          expected tab, they must also pass its id to verify.
+
+    Raises an error if the thread cannot be found.
+    """
+    markers = self.FindTimelineMarkers('first-renderer-thread')
+    assert len(markers) == 1
+    renderer_thread = markers[0].start_thread
+    assert renderer_thread == markers[0].end_thread
+    verifiers = list(renderer_thread.IterTimelineMarkers(tab_id))
+    assert len(verifiers) == 1, 'Renderer thread does not have expected tab id'
+    return renderer_thread
 
   def _CreateImporters(self, trace_data):
     def FindImporterClassForPart(part):

@@ -10,7 +10,7 @@ class GPUInfo(object):
 
   def __init__(self, device_array, aux_attributes,
                feature_status, driver_bug_workarounds):
-    if device_array == None:
+    if device_array is None:
       raise Exception('Missing required "devices" property')
     if len(device_array) == 0:
       raise Exception('Missing at least one GPU in device_array')
@@ -44,7 +44,6 @@ class GPUInfo(object):
     On the Chrome browser, for example, this dictionary contains:
       optimus (boolean)
       amd_switchable (boolean)
-      lenovo_dcute (boolean)
       driver_vendor (string)
       driver_version (string)
       driver_date (string)
@@ -52,7 +51,6 @@ class GPUInfo(object):
       gl_vendor (string)
       gl_renderer (string)
       gl_extensions (string)
-      display_link_version (string)
     """
     return self._aux_attributes
 

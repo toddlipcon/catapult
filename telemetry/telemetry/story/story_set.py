@@ -31,7 +31,8 @@ class StorySet(object):
           containing hash files for non-wpr archive data stored in cloud
           storage.
     """
-    self.stories = []
+    self._stories = []
+    self._story_names = set()
     self._archive_data_file = archive_data_file
     self._wpr_archive_info = None
     archive_info.AssertValidCloudStorageBucket(cloud_storage_bucket)
@@ -47,18 +48,11 @@ class StorySet(object):
                              for d in serving_dirs or [])
 
   @property
-  def allow_mixed_story_states(self):
-    """True iff Stories are allowed to have different StoryState classes.
-
-    There are no checks in place for determining if SharedStates are
-    being assigned correctly to all Stories in a given StorySet. The
-    majority of test cases should not need the ability to have multiple
-    SharedStates, which usually implies you should be writing multiple
-    benchmarks instead. We provide errors to avoid accidentally assigning
-    or defaulting to the wrong SharedState.
-    Override at your own risk. Here be dragons.
-    """
-    return False
+  def shared_state_class(self):
+    if self._stories:
+      return self._stories[0].shared_state_class
+    else:
+      return None
 
   @property
   def file_path(self):
@@ -96,16 +90,36 @@ class StorySet(object):
           os.path.join(self.base_dir, self.archive_data_file), self.bucket)
     return self._wpr_archive_info
 
+  @property
+  def stories(self):
+    return self._stories
+
   def AddStory(self, story):
     assert isinstance(story, story_module.Story)
-    self.stories.append(story)
+    assert self._IsUnique(story), ('Tried to add story with duplicate '
+                                   'name %s. Story names should be '
+                                   'unique.' % story.name)
+
+    shared_state_class = self.shared_state_class
+    if shared_state_class is not None:
+      assert story.shared_state_class == shared_state_class, (
+          'Story sets with mixed shared states are not allowed. Adding '
+          'story %s with shared state %s, but others have %s.' %
+          (story.name, story.shared_state_class, shared_state_class))
+
+    self._stories.append(story)
+    self._story_names.add(story.name)
+
+  def _IsUnique(self, story):
+    return story.name not in self._story_names
 
   def RemoveStory(self, story):
     """Removes a Story.
 
     Allows the stories to be filtered.
     """
-    self.stories.remove(story)
+    self._stories.remove(story)
+    self._story_names.remove(story.name)
 
   @classmethod
   def Name(cls):
@@ -128,7 +142,7 @@ class StorySet(object):
     else:
       return ''
 
-  def WprFilePathForStory(self, story):
+  def WprFilePathForStory(self, story, target_platform=None):
     """Convenient function to retrieve WPR archive file path.
 
     Args:
@@ -140,7 +154,8 @@ class StorySet(object):
     """
     if not self.wpr_archive_info:
       return None
-    return self.wpr_archive_info.WprFilePathForStory(story)
+    return self.wpr_archive_info.WprFilePathForStory(
+        story, target_platform=target_platform)
 
   def __iter__(self):
     return self.stories.__iter__()
@@ -152,4 +167,4 @@ class StorySet(object):
     return self.stories[key]
 
   def __setitem__(self, key, value):
-    self.stories[key] = value
+    self._stories[key] = value

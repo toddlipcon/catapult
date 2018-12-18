@@ -63,6 +63,9 @@ class TimelineBasedMetricTestData(object):
 
     self._results_wrapper = tbm_module._TBMResultWrapper()
     self._results = page_test_results.PageTestResults()
+    self._results.telemetry_info.benchmark_name = 'benchmark'
+    self._results.telemetry_info.benchmark_start_epoch = 123
+    self._results.telemetry_info.benchmark_descriptions = 'foo'
     self._story_set = None
     self._threads_to_records_map = None
     self._tbm_options = options
@@ -97,10 +100,11 @@ class TimelineBasedMetricTestData(object):
   def FinalizeImport(self):
     self._model.FinalizeImport()
     self._threads_to_records_map = (
-      tbm_module._GetRendererThreadsToInteractionRecordsMap(self._model))
+        tbm_module._GetRendererThreadsToInteractionRecordsMap(self._model))
     self._story_set = story.StorySet(base_dir=os.path.dirname(__file__))
     self._story_set.AddStory(page_module.Page(
-        'http://www.bar.com/', self._story_set, self._story_set.base_dir))
+        'http://www.bar.com/', self._story_set, self._story_set.base_dir,
+        name='http://www.bar.com/'))
     self._results.WillRunPage(self._story_set.stories[0])
 
   def AddResults(self):
@@ -121,15 +125,9 @@ class TimelineBasedMetricTestData(object):
 class TimelineBasedMetricsTests(unittest.TestCase):
 
   def setUp(self):
-    self.actual_get_all_tbm_metrics = (
-        tbm_module._GetAllLegacyTimelineBasedMetrics)
     self._options = tbm_module.Options()
     self._options.SetLegacyTimelineBasedMetrics(
         (FakeSmoothMetric(), FakeLoadingMetric(), FakeStartupMetric()))
-
-  def tearDown(self):
-    tbm_module._GetAllLegacyTimelineBasedMetrics = (
-        self.actual_get_all_tbm_metrics)
 
   def testGetRendererThreadsToInteractionRecordsMap(self):
     d = TimelineBasedMetricTestData(self._options)

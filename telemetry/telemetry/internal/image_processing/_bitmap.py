@@ -43,13 +43,13 @@ class _BitmapTools(object):
     packed_dims = struct.pack('iiiiiii', *dimensions)
     self._popen.stdin.write(packed_dims)
     # If we got a list of ints, we need to convert it into a byte buffer.
-    if type(pixels) is not bytearray:
+    if not isinstance(pixels, bytearray):
       pixels = bytearray(pixels)
     self._popen.stdin.write(pixels)
 
   def _RunCommand(self, *command):
     assert not self._popen.stdin.closed, (
-      'Exactly one command allowed per instance of tools.')
+        'Exactly one command allowed per instance of tools.')
     packed_command = struct.pack('i' * len(command), *command)
     self._popen.stdin.write(packed_command)
     self._popen.stdin.close()
@@ -70,8 +70,8 @@ class _BitmapTools(object):
     out.fromstring(response)
     assert len(out) == 768, (
         'The ColorHistogram has the wrong number of buckets: %s' % len(out))
-    return color_histogram.ColorHistogram(out[:256], out[256:512], out[512:],
-                                    ignore_color)
+    return color_histogram.ColorHistogram(
+        out[:256], out[256:512], out[512:], ignore_color)
 
   def BoundingBox(self, color, tolerance):
     response = self._RunCommand(_BitmapTools.BOUNDING_BOX, int(color),
@@ -126,7 +126,7 @@ class Bitmap(object):
       # pylint: disable=unpacking-non-sequence
       _, _, self._width, self._height = self._crop_box
       self._crop_box = None
-    if type(self._pixels) is not bytearray:
+    if not isinstance(self._pixels, bytearray):
       self._pixels = bytearray(self._pixels)
     return self._pixels
 

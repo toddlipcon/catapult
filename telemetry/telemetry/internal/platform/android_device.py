@@ -5,10 +5,8 @@
 import logging
 import os
 
-from telemetry.core import util
 from telemetry.internal.platform import cros_device
 from telemetry.internal.platform import device
-from telemetry.internal.platform.profiler import monsoon
 
 from devil.android import device_blacklist
 from devil.android import device_errors
@@ -48,8 +46,7 @@ class AndroidDevice(device.Device):
 
 def _ListSerialsOfHealthyOnlineDevices(blacklist):
   return [d.adb.GetDeviceSerial()
-          for d in device_utils.DeviceUtils.HealthyDevices(blacklist)
-          if d.IsOnline()]
+          for d in device_utils.DeviceUtils.HealthyDevices(blacklist)]
 
 
 def GetDeviceSerials(blacklist):
@@ -58,37 +55,11 @@ def GetDeviceSerials(blacklist):
   If a preferred device has been set with ANDROID_SERIAL, it will be first in
   the returned list. The arguments specify what devices to include in the list.
   """
-
   device_serials = _ListSerialsOfHealthyOnlineDevices(blacklist)
-
-  # The monsoon provides power for the device, so for devices with no
-  # real battery, we need to turn them on after the monsoon enables voltage
-  # output to the device.
-  if not device_serials:
-    try:
-      m = monsoon.Monsoon(wait=False)
-      m.SetUsbPassthrough(1)
-      m.SetVoltage(3.8)
-      m.SetMaxCurrent(8)
-      logging.warn("""
-Monsoon power monitor detected, but no Android devices.
-
-The Monsoon's power output has been enabled. Please now ensure that:
-
-  1. The Monsoon's front and back USB are connected to the host.
-  2. The device is connected to the Monsoon's main and USB channels.
-  3. The device is turned on.
-
-Waiting for device...
-""")
-      util.WaitFor(_ListSerialsOfHealthyOnlineDevices(blacklist), 600)
-      device_serials = _ListSerialsOfHealthyOnlineDevices(blacklist)
-    except IOError:
-      return []
 
   preferred_device = os.environ.get('ANDROID_SERIAL')
   if preferred_device in device_serials:
-    logging.warn(
+    logging.warning(
         'ANDROID_SERIAL is defined. Put %s in the first of the'
         'discovered devices list.' % preferred_device)
     device_serials.remove(preferred_device)
@@ -118,10 +89,10 @@ def GetDevice(finder_options):
 
   devices = AndroidDevice.GetAllConnectedDevices(blacklist)
   if len(devices) == 0:
-    logging.warn('No android devices found.')
+    logging.warning('No android devices found.')
     return None
   if len(devices) > 1:
-    logging.warn(
+    logging.warning(
         'Multiple devices attached. Please specify one of the following:\n' +
         '\n'.join(['  --device=%s' % d.device_id for d in devices]))
     return None

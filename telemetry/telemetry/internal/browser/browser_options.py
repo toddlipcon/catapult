@@ -12,6 +12,7 @@ import sys
 
 from py_utils import cloud_storage  # pylint: disable=import-error
 
+from telemetry import compact_mode_options
 from telemetry.core import platform
 from telemetry.core import util
 from telemetry.internal.browser import browser_finder
@@ -19,8 +20,8 @@ from telemetry.internal.browser import browser_finder_exceptions
 from telemetry.internal.browser import profile_types
 from telemetry.internal.platform import device_finder
 from telemetry.internal.platform import remote_platform_options
-from telemetry.internal.platform.profiler import profiler_finder
 from telemetry.internal.util import binary_manager
+from telemetry.internal.util import global_hooks
 from telemetry.util import wpr_modes
 
 
@@ -39,7 +40,6 @@ class BrowserFinderOptions(optparse.Values):
 
     self.cros_remote = None
 
-    self.profiler = None
     self.verbosity = 0
 
     self.browser_options = BrowserOptions()
@@ -47,7 +47,14 @@ class BrowserFinderOptions(optparse.Values):
 
     self.remote_platform_options = None
 
+    self.full_performance_mode = True
+
+    # TODO(crbug.com/798703): remove this
     self.no_performance_mode = False
+
+    self.interval_profiling_target = ''
+    self.interval_profiling_periods = []
+    self.interval_profiling_frequency = 1000
 
   def __repr__(self):
     return str(sorted(self.__dict__.items()))
@@ -60,24 +67,28 @@ class BrowserFinderOptions(optparse.Values):
 
     # Selection group
     group = optparse.OptionGroup(parser, 'Which browser to use')
-    group.add_option('--browser',
+    group.add_option(
+        '--browser',
         dest='browser_type',
         default=None,
         help='Browser type to run, '
-             'in order of priority. Supported values: list,%s' %
-             ','.join(browser_finder.FindAllBrowserTypes(self)))
-    group.add_option('--browser-executable',
+        'in order of priority. Supported values: list,%s' %
+        ', '.join(browser_finder.FindAllBrowserTypes(self)))
+    group.add_option(
+        '--browser-executable',
         dest='browser_executable',
         help='The exact browser to run.')
-    group.add_option('--chrome-root',
+    group.add_option(
+        '--chrome-root',
         dest='chrome_root',
         help='Where to look for chrome builds. '
              'Defaults to searching parent dirs by default.')
-    group.add_option('--chromium-output-directory',
+    group.add_option(
+        '--chromium-output-directory',
         dest='chromium_output_dir',
         help='Where to look for build artifacts. '
-             'Can also be specified by setting environment variable '
-             'CHROMIUM_OUTPUT_DIR.')
+        'Can also be specified by setting environment variable '
+        'CHROMIUM_OUTPUT_DIR.')
     group.add_option(
         '--remote',
         dest='cros_remote',
@@ -88,12 +99,27 @@ class BrowserFinderOptions(optparse.Values):
         default=socket.getservbyname('ssh'),
         dest='cros_remote_ssh_port',
         help='The SSH port of the remote ChromeOS device (requires --remote).')
+    compact_mode_options_list = [
+        compact_mode_options.NO_FIELD_TRIALS,
+        compact_mode_options.IGNORE_CERTIFICATE_ERROR,
+        compact_mode_options.LEGACY_COMMAND_LINE_PATH,
+        compact_mode_options.GPU_BENCHMARKING_FALLBACKS]
+    parser.add_option(
+        '--compatibility-mode',
+        action='append',
+        dest='compatibility_mode',
+        choices=compact_mode_options_list,
+        default=[],
+        help='Select the compatibility change that you want to enforce when '
+             'running benchmarks. The options are: %s' % ', '.join(
+                 compact_mode_options_list))
     identity = None
     testing_rsa = os.path.join(
         util.GetTelemetryThirdPartyDir(), 'chromite', 'ssh_keys', 'testing_rsa')
     if os.path.exists(testing_rsa):
       identity = testing_rsa
-    group.add_option('--identity',
+    group.add_option(
+        '--identity',
         dest='cros_ssh_identity',
         default=identity,
         help='The identity file to use when ssh\'ing into the ChromeOS device')
@@ -101,39 +127,78 @@ class BrowserFinderOptions(optparse.Values):
 
     # Debugging options
     group = optparse.OptionGroup(parser, 'When things go wrong')
-    profiler_choices = profiler_finder.GetAllAvailableProfilers()
-    group.add_option(
-        '--profiler', default=None, type='choice',
-        choices=profiler_choices,
-        help='Record profiling data using this tool. Supported values: %s. '
-             '(Notice: this flag cannot be used for Timeline Based Measurement '
-             'benchmarks.)' % ', '.join(profiler_choices))
     group.add_option(
         '-v', '--verbose', action='count', dest='verbosity',
         help='Increase verbosity level (repeat as needed)')
     group.add_option('--print-bootstrap-deps',
                      action='store_true',
                      help='Output bootstrap deps list.')
+    group.add_option(
+        '--extra-chrome-categories', dest='extra_chrome_categories', type=str,
+        help='Filter string to enable additional chrome tracing categories. See'
+             ' documentation here: https://cs.chromium.org/chromium/src/base/'
+             'trace_event/trace_config.h?rcl='
+             'c8db6c6371ca047c24d41f3972d5819bc83d83ae&l=125')
+    group.add_option(
+        '--extra-atrace-categories', dest='extra_atrace_categories', type=str,
+        help='Comma-separated list of extra atrace categories. Use atrace'
+             ' --list_categories to get full list.')
+    group.add_option(
+        '--enable-systrace', dest='enable_systrace', action='store_true',
+        help='Enable collection of systrace. (Useful on ChromeOS where'
+             ' atrace is not supported; collects scheduling information.)')
     parser.add_option_group(group)
 
     # Platform options
     group = optparse.OptionGroup(parser, 'Platform options')
-    group.add_option('--no-performance-mode', action='store_true',
+    group.add_option(
+        '--no-performance-mode', action='store_true',
         help='Some platforms run on "full performance mode" where the '
         'test is executed at maximum CPU speed in order to minimize noise '
         '(specially important for dashboards / continuous builds). '
         'This option prevents Telemetry from tweaking such platform settings.')
+    group.add_option(
+        '--webview-embedder-apk',
+        help='When running tests on android webview, more than one apk needs to'
+        ' be installed. The apk running the test is said to embed webview.')
     parser.add_option_group(group)
 
     # Remote platform options
     group = optparse.OptionGroup(parser, 'Remote platform options')
     group.add_option('--android-blacklist-file',
                      help='Device blacklist JSON file.')
-    group.add_option('--device',
-    help='The device ID to use. '
-         'If not specified, only 0 or 1 connected devices are supported. '
-         'If specified as "android", all available Android devices are '
-         'used.')
+    group.add_option(
+        '--device',
+        help='The device ID to use. '
+        'If not specified, only 0 or 1 connected devices are supported. '
+        'If specified as "android", all available Android devices are '
+        'used.')
+    parser.add_option_group(group)
+
+    # CPU profiling on Android.
+    group = optparse.OptionGroup(parser, (
+        'CPU profiling over intervals of interest, '
+        'Android and Linux only'))
+    group.add_option(
+        '--interval-profiling-target', dest='interval_profiling_target',
+        default='renderer:main', metavar='PROCESS_NAME[:THREAD_NAME]',
+        help='Run the CPU profiler on this process/thread (default=%default).')
+    group.add_option(
+        '--interval-profiling-period', dest='interval_profiling_periods',
+        type='choice', choices=('navigation', 'interactions'), action='append',
+        default=[], metavar='PERIOD',
+        help='Run the CPU profiler during this test period. '
+        'May be specified multiple times; available choices '
+        'are ["navigation", "interactions"]. Profile data will be written to'
+        'artifacts/*.perf.data (Android) or artifacts/*.profile.pb (Linux) '
+        'files in the output directory. See '
+        'https://developer.android.com/ndk/guides/simpleperf for more info on '
+        'Android profiling via simpleperf.')
+    group.add_option(
+        '--interval-profiling-frequency', default=1000, metavar='FREQUENCY',
+        type=int,
+        help='Frequency of CPU profiling samples, in samples per second '
+        '(default=%default).')
     parser.add_option_group(group)
 
     # Browser options.
@@ -146,9 +211,10 @@ class BrowserFinderOptions(optparse.Values):
         if k in self.__dict__ and self.__dict__[k] != None:
           continue
         self.__dict__[k] = v
-      ret = real_parse(args, self) # pylint: disable=E1121
+      ret = real_parse(args, self)  # pylint: disable=E1121
 
       if self.verbosity >= 2:
+        global_hooks.InstallSpyOnPopenArgs()
         logging.getLogger().setLevel(logging.DEBUG)
       elif self.verbosity:
         logging.getLogger().setLevel(logging.INFO)
@@ -184,7 +250,7 @@ class BrowserFinderOptions(optparse.Values):
             possible_browsers = browser_finder.GetAllAvailableBrowsers(self,
                                                                        device)
             browser_types[device.name] = sorted(
-              [browser.browser_type for browser in possible_browsers])
+                [browser.browser_type for browser in possible_browsers])
           except browser_finder_exceptions.BrowserFinderException as ex:
             print >> sys.stderr, 'ERROR: ', ex
             sys.exit(1)
@@ -195,6 +261,8 @@ class BrowserFinderOptions(optparse.Values):
           print '  ', device_name
           for browser_type in browser_types[device_name]:
             print '    ', browser_type
+          if len(browser_types[device_name]) == 0:
+            print '     No browsers found for this device'
         sys.exit(0)
 
       # Parse browser options.
@@ -228,15 +296,22 @@ class BrowserFinderOptions(optparse.Values):
     for k, v in defaults.__dict__.items():
       self.ensure_value(k, v)
 
+
 class BrowserOptions(object):
   """Options to be used for launching a browser."""
+  # Allows clients to check whether they are dealing with a browser_options
+  # object, without having to import this module. This may be needed in some
+  # cases to avoid cyclic-imports.
+  IS_BROWSER_OPTIONS = True
 
   # Levels of browser logging.
   NO_LOGGING = 'none'
   NON_VERBOSE_LOGGING = 'non-verbose'
   VERBOSE_LOGGING = 'verbose'
+  SUPER_VERBOSE_LOGGING = 'super-verbose'
 
-  _LOGGING_LEVELS = (NO_LOGGING, NON_VERBOSE_LOGGING, VERBOSE_LOGGING)
+  _LOGGING_LEVELS = (NO_LOGGING, NON_VERBOSE_LOGGING, VERBOSE_LOGGING,
+                     SUPER_VERBOSE_LOGGING)
   _DEFAULT_LOGGING_LEVEL = NO_LOGGING
 
   def __init__(self):
@@ -245,18 +320,16 @@ class BrowserOptions(object):
 
     self.extensions_to_load = []
 
-    # If set, copy the generated profile to this path on exit.
-    self.output_profile_path = None
-
     # When set to True, the browser will use the default profile.  Telemetry
     # will not provide an alternate profile directory.
     self.dont_override_profile = False
     self.profile_dir = None
     self.profile_type = None
+
+    self.assert_gpu_compositing = False
     self._extra_browser_args = set()
     self.extra_wpr_args = []
     self.wpr_mode = wpr_modes.WPR_OFF
-    self.full_performance_mode = True
 
     # The amount of time Telemetry should wait for the browser to start.
     # This property is not exposed as a command line option.
@@ -265,11 +338,13 @@ class BrowserOptions(object):
     self.disable_background_networking = True
     self.browser_user_agent_type = None
 
+    # pylint: disable=invalid-name
     self.clear_sytem_cache_for_browser_and_profile_on_start = False
     self.startup_url = 'about:blank'
 
     # Background pages of built-in component extensions can interfere with
     # performance measurements.
+    # pylint: disable=invalid-name
     self.disable_component_extensions_with_background_pages = True
     # Disable default apps.
     self.disable_default_apps = True
@@ -291,12 +366,25 @@ class BrowserOptions(object):
     # profiling results.
     self.take_screenshot_for_failed_page = False
 
+    # A list of tuples where the first element is path to an existing file,
+    # and the second argument is a path (relative to the user-data-dir) to copy
+    # the file to. Uses recursive directory creation if directories do not
+    # already exist.
+    self.profile_files_to_copy = []
+
+    # The list of compatibility change that you want to enforce, mainly for
+    # earlier versions of Chrome
+    self.compatibility_mode = []
+
   def __repr__(self):
     # This works around the infinite loop caused by the introduction of a
     # circular reference with _finder_options.
     obj = self.__dict__.copy()
     del obj['_finder_options']
     return str(sorted(obj.items()))
+
+  def Copy(self):
+    return copy.deepcopy(self)
 
   def IsCrosBrowserOptions(self):
     return False
@@ -312,29 +400,35 @@ class BrowserOptions(object):
 
     group = optparse.OptionGroup(parser, 'Browser options')
     profile_choices = profile_types.GetProfileTypes()
-    group.add_option('--profile-type',
+    group.add_option(
+        '--profile-type',
         dest='profile_type',
         type='choice',
         default='clean',
         choices=profile_choices,
         help=('The user profile to use. A clean profile is used by default. '
               'Supported values: ' + ', '.join(profile_choices)))
-    group.add_option('--profile-dir',
+    group.add_option(
+        '--profile-dir',
         dest='profile_dir',
         help='Profile directory to launch the browser with. '
              'A clean profile is used by default')
-    group.add_option('--extra-browser-args',
+    group.add_option(
+        '--extra-browser-args',
         dest='extra_browser_args_as_string',
         help='Additional arguments to pass to the browser when it starts')
-    group.add_option('--extra-wpr-args',
+    group.add_option(
+        '--extra-wpr-args',
         dest='extra_wpr_args_as_string',
         help=('Additional arguments to pass to Web Page Replay. '
               'See third_party/web-page-replay/replay.py for usage.'))
-    group.add_option('--show-stdout',
+    group.add_option(
+        '--show-stdout',
         action='store_true',
         help='When possible, will display the stdout of the process')
 
-    group.add_option('--browser-logging-verbosity',
+    group.add_option(
+        '--browser-logging-verbosity',
         dest='logging_verbosity',
         type='choice',
         choices=cls._LOGGING_LEVELS,
@@ -342,21 +436,27 @@ class BrowserOptions(object):
               "directory. Note that logging affects the browser's "
               'performance. Supported values: %s. Defaults to %s.' % (
                   ', '.join(cls._LOGGING_LEVELS), cls._DEFAULT_LOGGING_LEVEL)))
+    group.add_option(
+        '--assert-gpu-compositing',
+        dest='assert_gpu_compositing', action='store_true',
+        help='Assert the browser uses gpu compositing and not software path.')
     parser.add_option_group(group)
 
     group = optparse.OptionGroup(parser, 'Compatibility options')
-    group.add_option('--gtest_output',
+    group.add_option(
+        '--gtest_output',
         help='Ignored argument for compatibility with runtest.py harness')
     parser.add_option_group(group)
 
   def UpdateFromParseResults(self, finder_options):
-    """Copies our options from finder_options"""
+    """Copies our options from finder_options."""
     browser_options_list = [
         'extra_browser_args_as_string',
         'extra_wpr_args_as_string',
         'profile_dir',
         'profile_type',
         'show_stdout',
+        'compatibility_mode'
         ]
     for o in browser_options_list:
       a = getattr(finder_options, o, None)
@@ -369,22 +469,24 @@ class BrowserOptions(object):
 
     if hasattr(self, 'extra_browser_args_as_string'):
       tmp = shlex.split(
-        self.extra_browser_args_as_string)
+          self.extra_browser_args_as_string)
       self.AppendExtraBrowserArgs(tmp)
       delattr(self, 'extra_browser_args_as_string')
     if hasattr(self, 'extra_wpr_args_as_string'):
       tmp = shlex.split(
-        self.extra_wpr_args_as_string)
+          self.extra_wpr_args_as_string)
       self.extra_wpr_args.extend(tmp)
       delattr(self, 'extra_wpr_args_as_string')
     if self.profile_type == 'default':
       self.dont_override_profile = True
 
-    if self.profile_dir and self.profile_type != 'clean':
-      logging.critical(
-          "It's illegal to specify both --profile-type and --profile-dir.\n"
-          "For more information see: http://goo.gl/ngdGD5")
-      sys.exit(1)
+    if self.profile_dir:
+      if self.profile_type != 'clean':
+        logging.critical(
+            "It's illegal to specify both --profile-type and --profile-dir.\n"
+            "For more information see: http://goo.gl/ngdGD5")
+        sys.exit(1)
+      self.profile_dir = os.path.abspath(self.profile_dir)
 
     if self.profile_dir and not os.path.isdir(self.profile_dir):
       logging.critical(
@@ -455,14 +557,27 @@ class CrosBrowserOptions(ChromeBrowserOptions):
     self.create_browser_with_oobe = False
     # Clear enterprise policy before logging in.
     self.clear_enterprise_policy = True
+    # By default, allow policy fetches to fail. A side effect is that the user
+    # profile may become initialized before policy is available.
+    # When this is set to True, chrome will not allow policy fetches to fail and
+    # block user profile initialization on policy initialization.
+    self.expect_policy_fetch = False
     # Disable GAIA/enterprise services.
     self.disable_gaia_services = True
+
+    # TODO(cywang): crbug.com/760414
+    # Add login delay for ARC container boot time measurement for now.
+    # Should actually simulate username/password typing in the login
+    # screen instead or make the wait time fixed for cros login.
+    self.login_delay = 0
 
     self.auto_login = True
     self.gaia_login = False
     self.username = 'test@test.test'
     self.password = ''
     self.gaia_id = '12345'
+    # For non-accelerated QEMU VMs.
+    self.browser_startup_timeout = 240
 
   def IsCrosBrowserOptions(self):
     return True

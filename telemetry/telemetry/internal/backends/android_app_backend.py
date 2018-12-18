@@ -4,14 +4,15 @@
 
 import re
 
-from telemetry.core import util
 from telemetry.internal.app import android_process
 from telemetry.internal.backends import android_browser_backend_settings
-from telemetry.internal.backends import android_command_line_backend
 from telemetry.internal.backends import app_backend
 
 from devil.android import app_ui
+from devil.android import flag_changer
 from devil.android.sdk import intent
+
+import py_utils
 
 
 class AndroidAppBackend(app_backend.AppBackend):
@@ -39,7 +40,7 @@ class AndroidAppBackend(app_backend.AppBackend):
 
   def _LaunchAndWaitForApplication(self):
     """Launch the app and wait for it to be ready."""
-    def is_app_ready():
+    def IsAppReady():
       return self._is_app_ready_predicate(self.app)
 
     # When "is_app_ready_predicate" is provided, we use it to wait for the
@@ -53,7 +54,7 @@ class AndroidAppBackend(app_backend.AppBackend):
         force_stop=True,  # Ensure app was not running.
     )
     if has_ready_predicate:
-      util.WaitFor(is_app_ready, timeout=60)
+      py_utils.WaitFor(IsAppReady, timeout=60)
 
   def Start(self):
     """Start an Android app and wait for it to finish launching.
@@ -66,11 +67,10 @@ class AndroidAppBackend(app_backend.AppBackend):
     """
     if self._app_has_webviews:
       webview_startup_args = self.GetWebviewStartupArgs()
-      backend_settings = (
-          android_browser_backend_settings.WebviewBackendSettings(
-              'android-webview'))
-      with android_command_line_backend.SetUpCommandLineFlags(
-          self.device, backend_settings, webview_startup_args):
+      command_line_name = (
+          android_browser_backend_settings.ANDROID_WEBVIEW.command_line_name)
+      with flag_changer.CustomCommandLineFlags(
+          self.device, command_line_name, webview_startup_args):
         self._LaunchAndWaitForApplication()
     else:
       self._LaunchAndWaitForApplication()
@@ -82,6 +82,17 @@ class AndroidAppBackend(app_backend.AppBackend):
                       activity=self._start_intent.activity,
                       action=None,
                       flags=[intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED]),
+        blocking=True)
+
+  def Background(self):
+    package = 'org.chromium.push_apps_to_background'
+    activity = package + '.PushAppsToBackgroundActivity'
+    self.device.StartActivity(
+        intent.Intent(
+            package=package,
+            activity=activity,
+            action=None,
+            flags=[intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED]),
         blocking=True)
 
   def Close(self):

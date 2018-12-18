@@ -176,31 +176,6 @@ def TimestampsDiscrepancy(timestamps, absolute=True,
   return discrepancy
 
 
-def DurationsDiscrepancy(durations, absolute=True,
-                         location_count=None):
-  """A discrepancy based metric for measuring duration jank.
-
-  DurationsDiscrepancy computes a jank metric which measures how irregular a
-  given sequence of intervals is. In order to minimize jank, each duration
-  should be equally long. This is similar to how timestamp jank works,
-  and we therefore reuse the timestamp discrepancy function above to compute a
-  similar duration discrepancy number.
-
-  Because timestamp discrepancy is defined in terms of timestamps, we first
-  convert the list of durations to monotonically increasing timestamps.
-
-  Args:
-    durations: List of interval lengths in milliseconds.
-    absolute: See TimestampsDiscrepancy.
-    interval_multiplier: See TimestampsDiscrepancy.
-  """
-  if not durations:
-    return 0.0
-
-  timestamps = reduce(lambda x, y: x + [x[-1] + y], durations, [0])
-  return TimestampsDiscrepancy(timestamps, absolute, location_count)
-
-
 def ArithmeticMean(data):
   """Calculates arithmetic mean.
 
@@ -264,11 +239,11 @@ def TrapezoidalRule(data, dx):
 
 def Total(data):
   """Returns the float value of a number or the sum of a list."""
-  if type(data) == float:
+  if isinstance(data, float):
     total = data
-  elif type(data) == int:
+  elif isinstance(data, int):
     total = float(data)
-  elif type(data) == list:
+  elif isinstance(data, list):
     total = float(sum(data))
   else:
     raise TypeError

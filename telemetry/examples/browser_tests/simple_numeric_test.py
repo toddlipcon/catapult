@@ -3,12 +3,13 @@
 # found in the LICENSE file.
 
 import string
+import sys
 import time
 
 from telemetry.testing import serially_executed_browser_test_case
 
 
-_prev_test_name = None
+_PREV_TEST_NAME = None
 
 class SimpleTest(
     serially_executed_browser_test_case.SeriallyExecutedBrowserTestCase):
@@ -48,9 +49,9 @@ class SimpleTest(
 
   def AlphabeticalTest(self):
     test_name = self.id()
-    global _prev_test_name
-    self.assertLess(_prev_test_name, test_name)
-    _prev_test_name = test_name
+    global _PREV_TEST_NAME # pylint: disable=global-statement
+    self.assertLess(_PREV_TEST_NAME, test_name)
+    _PREV_TEST_NAME = test_name
 
   def AdderTest(self, a, b, partial_sum):
     self.assertEqual(a + b, partial_sum)
@@ -73,3 +74,9 @@ class SimpleTest(
 
   def TestException(self):
     raise Exception('Expected exception')
+
+
+def load_tests(loader, tests, pattern): # pylint: disable=invalid-name
+  del loader, tests, pattern  # Unused.
+  return serially_executed_browser_test_case.LoadAllTestsInModule(
+      sys.modules[__name__])

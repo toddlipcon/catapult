@@ -7,11 +7,11 @@
 import json
 import urllib
 
-from dashboard import datastore_hooks
 from dashboard import find_anomalies
 from dashboard import find_change_points
-from dashboard import request_handler
-from dashboard import utils
+from dashboard.common import datastore_hooks
+from dashboard.common import request_handler
+from dashboard.common import utils
 from dashboard.models import anomaly
 from dashboard.models import anomaly_config
 from dashboard.models import graph_data
@@ -251,7 +251,7 @@ def _FetchLatestRows(test, num_points):
   assert utils.IsInternalUser() or not test.internal_only
   datastore_hooks.SetSinglePrivilegedRequest()
   return list(reversed(
-      graph_data.GetLatestRowsForTest(test.key, num_points, privileged=True)))
+      graph_data.GetLatestRowsForTest(test.key, num_points)))
 
 
 def _FetchRowsAroundRev(test, revision, num_before, num_after):
@@ -270,12 +270,13 @@ def _FetchRowsAroundRev(test, revision, num_before, num_after):
   """
   assert utils.IsInternalUser() or not test.internal_only
   return graph_data.GetRowsForTestBeforeAfterRev(
-      test.key, revision, num_before, num_after, privileged=True)
+      test.key, revision, num_before, num_after)
 
 
 def _FetchStoredAnomalies(test, revisions):
   """Makes a list of data about Anomaly entities for a Test."""
-  stored_anomalies = anomaly.Anomaly.GetAlertsForTest(test.key)
+  stored_anomalies, _, _ = anomaly.Anomaly.QueryAsync(
+      test=test.key).get_result()
 
   stored_anomaly_dicts = []
   for a in stored_anomalies:

@@ -25,7 +25,8 @@ class PlayAction(media_action.MediaAction):
                ended_event_timeout_in_seconds=0):
     super(PlayAction, self).__init__()
     self._selector = selector if selector else ''
-    self._playing_event_timeout_in_seconds = playing_event_timeout_in_seconds
+    self._playing_event_timeout_in_seconds = ( # pylint: disable=invalid-name
+        playing_event_timeout_in_seconds)
     self._ended_event_timeout_in_seconds = ended_event_timeout_in_seconds
 
   def WillRunAction(self, tab):
@@ -35,7 +36,8 @@ class PlayAction(media_action.MediaAction):
 
   def RunAction(self, tab):
     try:
-      tab.ExecuteJavaScript('window.__playMedia("%s");' % self._selector)
+      tab.ExecuteJavaScript(
+          'window.__playMedia({{ selector }});', selector=self._selector)
       # Check if we need to wait for 'playing' event to fire.
       if self._playing_event_timeout_in_seconds > 0:
         self.WaitForEvent(tab, self._selector, 'playing',
@@ -47,3 +49,6 @@ class PlayAction(media_action.MediaAction):
     except exceptions.EvaluateException:
       raise page_action.PageActionFailed('Cannot play media element(s) with '
                                          'selector = %s.' % self._selector)
+
+  def __str__(self):
+    return "%s(%s)" % (self.__class__.__name__, self._selector)

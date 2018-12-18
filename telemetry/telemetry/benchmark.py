@@ -3,15 +3,24 @@
 # found in the LICENSE file.
 
 import optparse
+import sys
 
+from py_utils import class_util
+from py_utils import expectations_parser
 from telemetry import decorators
 from telemetry.internal import story_runner
 from telemetry.internal.util import command_line
 from telemetry.page import legacy_page_test
+from telemetry.story import expectations as expectations_module
+from telemetry.web_perf import story_test
 from telemetry.web_perf import timeline_based_measurement
+from tracing.value.diagnostics import generic_set
 
-Disabled = decorators.Disabled
-Enabled = decorators.Enabled
+Info = decorators.Info
+
+# TODO(crbug.com/859524): remove this once we update all the benchmarks in
+# tools/perf to use Info decorator.
+Owner = decorators.Info # pylint: disable=invalid-name
 
 
 class InvalidOptionsError(Exception):
@@ -20,6 +29,7 @@ class InvalidOptionsError(Exception):
 
 
 class BenchmarkMetadata(object):
+
   def __init__(self, name, description='', rerun_options=None):
     self._name = name
     self._description = description
@@ -39,10 +49,10 @@ class BenchmarkMetadata(object):
 
   def AsDict(self):
     return {
-      'type': 'telemetry_benchmark',
-      'name': self._name,
-      'description': self._description,
-      'rerun_options': self._rerun_options,
+        'type': 'telemetry_benchmark',
+        'name': self._name,
+        'description': self._description,
+        'rerun_options': self._rerun_options,
     }
 
 
@@ -58,6 +68,9 @@ class Benchmark(command_line.Command):
   options = {}
   page_set = None
   test = timeline_based_measurement.TimelineBasedMeasurement
+  SUPPORTED_PLATFORMS = [expectations_module.ALL]
+
+  MAX_NUM_VALUES = sys.maxint
 
   def __init__(self, max_failures=None):
     """Creates a new Benchmark.
@@ -66,24 +79,25 @@ class Benchmark(command_line.Command):
       max_failures: The number of story run's failures before bailing
           from executing subsequent page runs. If None, we never bail.
     """
+    self._expectations = expectations_module.StoryExpectations()
     self._max_failures = max_failures
-    self._has_original_tbm_options = (
-        self.CreateTimelineBasedMeasurementOptions.__func__ ==
-        Benchmark.CreateTimelineBasedMeasurementOptions.__func__)
-    has_original_create_page_test = (
-        self.CreatePageTest.__func__ == Benchmark.CreatePageTest.__func__)
-    assert self._has_original_tbm_options or has_original_create_page_test, (
-        'Cannot override both CreatePageTest and '
-        'CreateTimelineBasedMeasurementOptions.')
+    # TODO: There should be an assertion here that checks that only one of
+    # the following is true:
+    # * It's a TBM benchmark, with CreateCoreTimelineBasedMeasurementOptions
+    #   defined.
+    # * It's a legacy benchmark, with either CreatePageTest defined or
+    #   Benchmark.test set.
+    # See https://github.com/catapult-project/catapult/issues/3708
 
-  # pylint: disable=unused-argument
-  @classmethod
-  def ShouldDisable(cls, possible_browser):
-    """Override this method to disable a benchmark under specific conditions.
 
-     Supports logic too complex for simple Enabled and Disabled decorators.
-     Decorators are still respected in cases where this function returns False.
-     """
+  def _CanRunOnPlatform(self, platform, finder_options):
+    for p in self.SUPPORTED_PLATFORMS:
+      # This is reusing StoryExpectation code, so it is a bit unintuitive. We
+      # are trying to detect the opposite of the usual case in StoryExpectations
+      # so we want to return True when ShouldDisable returns true, even though
+      # we do not want to disable.
+      if p.ShouldDisable(platform, finder_options):
+        return True
     return False
 
   def Run(self, finder_options):
@@ -97,43 +111,6 @@ class Benchmark(command_line.Command):
   @classmethod
   def Name(cls):
     return '%s.%s' % (cls.__module__.split('.')[-1], cls.__name__)
-
-  @classmethod
-  def ShouldTearDownStateAfterEachStoryRun(cls):
-    """Override to specify whether to tear down state after each story run.
-
-    Tearing down all states after each story run, e.g., clearing profiles,
-    stopping the browser, stopping local server, etc. So the browser will not be
-    reused among multiple stories. This is particularly useful to get the
-    startup part of launching the browser in each story.
-
-    This should only be used by TimelineBasedMeasurement (TBM) benchmarks, but
-    not by PageTest based benchmarks.
-    """
-    return True
-
-  # NOTE: this is a temporary workaround for crbug.com/645329, do not rely on
-  # this as a stable public API as we may remove this without public notice.
-  @classmethod
-  def IsShouldTearDownStateAfterEachStoryRunOverriden(cls):
-    return (cls.ShouldTearDownStateAfterEachStoryRun.__func__ !=
-            Benchmark.ShouldTearDownStateAfterEachStoryRun.__func__)
-
-  @classmethod
-  def ShouldTearDownStateAfterEachStorySetRun(cls):
-    """Override to specify whether to tear down state after each story set run.
-
-    Defaults to True in order to reset the state and make individual story set
-    repeats more independent of each other. The intended effect is to average
-    out noise in measurements between repeats.
-
-    Long running benchmarks willing to stess test the browser and have it run
-    for long periods of time may switch this value to False.
-
-    This should only be used by TimelineBasedMeasurement (TBM) benchmarks, but
-    not by PageTest based benchmarks.
-    """
-    return True
 
   @classmethod
   def AddCommandLineArgs(cls, parser):
@@ -178,8 +155,7 @@ class Benchmark(command_line.Command):
   @classmethod
   def SetArgumentDefaults(cls, parser):
     default_values = parser.get_default_values()
-    invalid_options = [
-        o for o in cls.options if not hasattr(default_values, o)]
+    invalid_options = [o for o in cls.options if not hasattr(default_values, o)]
     if invalid_options:
       raise InvalidOptionsError('Invalid benchmark options: %s',
                                 ', '.join(invalid_options))
@@ -191,21 +167,20 @@ class Benchmark(command_line.Command):
 
   # pylint: disable=unused-argument
   @classmethod
-  def ValueCanBeAddedPredicate(cls, value, is_first_result):
-    """Returns whether |value| can be added to the test results.
+  def ShouldAddValue(cls, name, from_first_story_run):
+    """Returns whether the named value should be added to PageTestResults.
 
     Override this method to customize the logic of adding values to test
-    results.
+    results. SkipValues and TraceValues will be added regardless
+    of logic here.
 
     Args:
-      value: a value.Value instance (except failure.FailureValue,
-        skip.SkipValue or trace.TraceValue which will always be added).
-      is_first_result: True if |value| is the first result for its
-          corresponding story.
+      name: The string name of a value being added.
+      from_first_story_run: True if the named value was produced during the
+          first run of the corresponding story.
 
     Returns:
-      True if |value| should be added to the test results.
-      Otherwise, it returns False.
+      True if the value should be added to the test results, False otherwise.
     """
     return True
 
@@ -213,23 +188,122 @@ class Benchmark(command_line.Command):
     """Add browser options that are required by this benchmark."""
 
   def GetMetadata(self):
-    return BenchmarkMetadata(
-        self.Name(), self.__doc__, self.GetTraceRerunCommands())
+    return BenchmarkMetadata(self.Name(), self.__doc__,
+                             self.GetTraceRerunCommands())
 
+  def GetBugComponents(self):
+    """Returns a GenericSet Diagnostic containing the benchmark's Monorail
+       component.
+
+    Returns:
+      GenericSet Diagnostic with the benchmark's bug component name
+    """
+    benchmark_component = decorators.GetComponent(self)
+    component_diagnostic_value = (
+        [benchmark_component] if benchmark_component else [])
+    return generic_set.GenericSet(component_diagnostic_value)
+
+  def GetOwners(self):
+    """Returns a Generic Diagnostic containing the benchmark's owners' emails
+       in a list.
+
+    Returns:
+      Diagnostic with a list of the benchmark's owners' emails
+    """
+    return generic_set.GenericSet(decorators.GetEmails(self) or [])
+
+  def GetDocumentationLink(self):
+    """Returns a Generic Diagnostic containing the benchmark's documentation
+       link in a string.
+
+    Returns:
+      Diagnostic with the link (string) to the benchmark documentation.
+    """
+    pair = ['Benchmark documentation link',
+            decorators.GetDocumentationLink(self)]
+    return generic_set.GenericSet([pair])
+
+  @decorators.Deprecated(
+      2017, 7, 29, 'Use CreateCoreTimelineBasedMeasurementOptions instead.')
   def CreateTimelineBasedMeasurementOptions(self):
-    """Return the TimelineBasedMeasurementOptions for this Benchmark.
+    """See CreateCoreTimelineBasedMeasurementOptions."""
+    return self.CreateCoreTimelineBasedMeasurementOptions()
 
-    Override this method to configure a TimelineBasedMeasurement benchmark.
-    Otherwise, override CreatePageTest for PageTest tests. Do not override
-    both methods.
+  def CreateCoreTimelineBasedMeasurementOptions(self):
+    """Return the base TimelineBasedMeasurementOptions for this Benchmark.
+
+    Additional chrome and atrace categories can be appended when running the
+    benchmark with the --extra-chrome-categories and --extra-atrace-categories
+    flags.
+
+    Override this method to configure a TimelineBasedMeasurement benchmark. If
+    this is not a TimelineBasedMeasurement benchmark, override CreatePageTest
+    for PageTest tests. Do not override both methods.
     """
     return timeline_based_measurement.Options()
+
+  def _GetTimelineBasedMeasurementOptions(self, options):
+    """Return all timeline based measurements for the curren benchmark run.
+
+    This includes the benchmark-configured measurements in
+    CreateCoreTimelineBasedMeasurementOptions as well as the user-flag-
+    configured options from --extra-chrome-categories and
+    --extra-atrace-categories.
+    """
+    # TODO(sullivan): the benchmark options should all be configured in
+    # CreateCoreTimelineBasedMeasurementOptions. Remove references to
+    # CreateCoreTimelineBasedMeasurementOptions when it is fully deprecated.
+    # In the short term, if the benchmark overrides
+    # CreateCoreTimelineBasedMeasurementOptions use the overridden version,
+    # otherwise call CreateCoreTimelineBasedMeasurementOptions.
+    # https://github.com/catapult-project/catapult/issues/3450
+    tbm_options = None
+    assert not (
+        class_util.IsMethodOverridden(Benchmark, self.__class__,
+                                      'CreateTimelineBasedMeasurementOptions')
+        and class_util.IsMethodOverridden(
+            Benchmark, self.__class__,
+            'CreateCoreTimelineBasedMeasurementOptions')
+    ), ('Benchmarks should override CreateCoreTimelineBasedMeasurementOptions '
+        'and NOT also CreateTimelineBasedMeasurementOptions.')
+    if class_util.IsMethodOverridden(
+        Benchmark, self.__class__, 'CreateCoreTimelineBasedMeasurementOptions'):
+      tbm_options = self.CreateCoreTimelineBasedMeasurementOptions()
+    else:
+      tbm_options = self.CreateTimelineBasedMeasurementOptions()
+    if options and options.extra_chrome_categories:
+      # If Chrome tracing categories for this benchmark are not already
+      # enabled, there is probably a good reason why. Don't change whether
+      # Chrome tracing is enabled.
+      assert tbm_options.config.enable_chrome_trace, (
+          'This benchmark does not support Chrome tracing.')
+      tbm_options.config.chrome_trace_config.category_filter.AddFilterString(
+          options.extra_chrome_categories)
+    if options and options.extra_atrace_categories:
+      # Many benchmarks on Android run without atrace by default. Hopefully the
+      # user understands that atrace is only supported on Android when setting
+      # this option.
+      tbm_options.config.enable_atrace_trace = True
+
+      categories = tbm_options.config.atrace_config.categories
+      if isinstance(categories, basestring):
+        # Categories can either be a list or comma-separated string.
+        # https://github.com/catapult-project/catapult/issues/3712
+        categories = categories.split(',')
+      for category in options.extra_atrace_categories.split(','):
+        if category not in categories:
+          categories.append(category)
+      tbm_options.config.atrace_config.categories = categories
+    if options and options.enable_systrace:
+      tbm_options.config.chrome_trace_config.SetEnableSystrace()
+    return tbm_options
+
 
   def CreatePageTest(self, options):  # pylint: disable=unused-argument
     """Return the PageTest for this Benchmark.
 
     Override this method for PageTest tests.
-    Override, override CreateTimelineBasedMeasurementOptions to configure
+    Override, CreateCoreTimelineBasedMeasurementOptions to configure
     TimelineBasedMeasurement tests. Do not override both methods.
 
     Args:
@@ -239,19 +313,19 @@ class Benchmark(command_line.Command):
       Otherwise, a TimelineBasedMeasurement instance.
     """
     is_page_test = issubclass(self.test, legacy_page_test.LegacyPageTest)
-    is_tbm = self.test == timeline_based_measurement.TimelineBasedMeasurement
-    if not is_page_test and not is_tbm:
-      raise TypeError('"%s" is not a PageTest or a TimelineBasedMeasurement.' %
+    is_story_test = issubclass(self.test, story_test.StoryTest)
+    if not is_page_test and not is_story_test:
+      raise TypeError('"%s" is not a PageTest or a StoryTest.' %
                       self.test.__name__)
     if is_page_test:
-      assert self._has_original_tbm_options, (
-          'Cannot override CreateTimelineBasedMeasurementOptions '
-          'with a PageTest.')
+      # TODO: assert that CreateCoreTimelineBasedMeasurementOptions is not
+      # defined. That's incorrect for a page test. See
+      # https://github.com/catapult-project/catapult/issues/3708
       return self.test()  # pylint: disable=no-value-for-parameter
 
-    opts = self.CreateTimelineBasedMeasurementOptions()
+    opts = self._GetTimelineBasedMeasurementOptions(options)
     self.SetupTraceRerunOptions(options, opts)
-    return timeline_based_measurement.TimelineBasedMeasurement(opts)
+    return self.test(opts)
 
   def CreateStorySet(self, options):
     """Creates the instance of StorySet used to run the benchmark.
@@ -264,6 +338,20 @@ class Benchmark(command_line.Command):
     if not self.page_set:
       raise NotImplementedError('This test has no "page_set" attribute.')
     return self.page_set()  # pylint: disable=not-callable
+
+  def GetBrokenExpectations(self, story_set):
+    if self._expectations:
+      return self._expectations.GetBrokenExpectations(story_set)
+    return []
+
+  def AugmentExpectationsWithParser(self, data):
+    parser = expectations_parser.TestExpectationParser(data)
+    self._expectations.GetBenchmarkExpectationsFromParser(
+        parser.expectations, self.Name())
+
+  @property
+  def expectations(self):
+    return self._expectations
 
 
 def AddCommandLineArgs(parser):

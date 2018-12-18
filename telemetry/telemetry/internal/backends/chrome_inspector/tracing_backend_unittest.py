@@ -9,11 +9,11 @@ from telemetry import decorators
 from telemetry.internal.backends.chrome_inspector import tracing_backend
 from telemetry.internal.backends.chrome_inspector.tracing_backend import _DevToolsStreamReader
 from telemetry.testing import fakes
-from telemetry.testing import simple_mock
 from telemetry.testing import tab_test_case
+from telemetry.timeline import chrome_trace_config
 from telemetry.timeline import model as model_module
-from telemetry.timeline import trace_data
 from telemetry.timeline import tracing_config
+from tracing.trace_data import trace_data
 
 
 class TracingBackendTest(tab_test_case.TabTestCase):
@@ -28,9 +28,6 @@ class TracingBackendTest(tab_test_case.TabTestCase):
         # Memory maps currently cannot be retrieved on sandboxed processes.
         # See crbug.com/461788.
         '--no-sandbox',
-
-        # Workaround to disable periodic memory dumps. See crbug.com/513692.
-        '--enable-memory-benchmarking'
     ])
 
   def setUp(self):
@@ -41,9 +38,9 @@ class TracingBackendTest(tab_test_case.TabTestCase):
     if not self._browser.supports_memory_dumping:
       self.skipTest('Browser does not support memory dumping, skipping test.')
 
-  # win-reference: https://github.com/catapult-project/catapult/issues/2409.
+  # win: https://github.com/catapult-project/catapult/issues/3131.
   # chromeos: http://crbug.com/622836.
-  @decorators.Disabled('win-reference', 'chromeos')
+  @decorators.Disabled('win', 'chromeos')
   def testDumpMemorySuccess(self):
     # Check that dumping memory before tracing starts raises an exception.
     self.assertRaises(Exception, self._browser.DumpMemory)
@@ -52,6 +49,8 @@ class TracingBackendTest(tab_test_case.TabTestCase):
     config = tracing_config.TracingConfig()
     config.chrome_trace_config.category_filter.AddDisabledByDefault(
         'disabled-by-default-memory-infra')
+    config.chrome_trace_config.SetMemoryDumpConfig(
+        chrome_trace_config.MemoryDumpConfig())
     config.enable_chrome_trace = True
     self._tracing_controller.StartTracing(config)
 
@@ -64,7 +63,8 @@ class TracingBackendTest(tab_test_case.TabTestCase):
       self.assertNotIn(dump_id, expected_dump_ids)
       expected_dump_ids.append(dump_id)
 
-    tracing_data = self._tracing_controller.StopTracing()
+    tracing_data, errors = self._tracing_controller.StopTracing()
+    self.assertEqual(errors, [])
 
     # Check that clock sync data is in tracing data.
     clock_sync_found = False
@@ -99,7 +99,8 @@ class TracingBackendTest(tab_test_case.TabTestCase):
     # Check that the method returns None if the dump was not successful.
     self.assertIsNone(self._browser.DumpMemory())
 
-    tracing_data = self._tracing_controller.StopTracing()
+    tracing_data, errors = self._tracing_controller.StopTracing()
+    self.assertEqual(errors, [])
 
     # Check that dumping memory after tracing stopped raises an exception.
     self.assertRaises(Exception, self._browser.DumpMemory)
@@ -112,20 +113,27 @@ class TracingBackendTest(tab_test_case.TabTestCase):
     self.assertEqual(len(list(model.IterGlobalMemoryDumps())), 0)
 
 
-class TracingBackendUnitTest(unittest.TestCase):
-
+class TracingBackendUnittest(unittest.TestCase):
   def setUp(self):
-    self._mock_timer = simple_mock.MockTimer(tracing_backend)
-    self._inspector_socket = fakes.FakeInspectorWebsocket(self._mock_timer)
+    self._fake_timer = fakes.FakeTimer(tracing_backend)
+    self._inspector_socket = fakes.FakeInspectorWebsocket(self._fake_timer)
 
   def tearDown(self):
-    self._mock_timer.Restore()
+    self._fake_timer.Restore()
+
+  def _GetRawChromeTracesFor(self, trace_data_builder):
+    data = trace_data_builder.AsData().GetTracesFor(
+        trace_data.CHROME_TRACE_PART)
+    traces = []
+    for d in data:
+      traces.append(d)
+    return traces
 
   def testCollectTracingDataTimeout(self):
     self._inspector_socket.AddEvent(
-        'Tracing.dataCollected', {'value': [{'ph': 'B'}]}, 9)
+        'Tracing.dataCollected', {'value': {'traceEvents': [{'ph': 'B'}]}}, 9)
     self._inspector_socket.AddEvent(
-        'Tracing.dataCollected', {'value': [{'ph': 'E'}]}, 19)
+        'Tracing.dataCollected', {'value': {'traceEvents': [{'ph': 'E'}]}}, 19)
     self._inspector_socket.AddEvent('Tracing.tracingComplete', {}, 35)
     backend = tracing_backend.TracingBackend(self._inspector_socket)
 
@@ -134,37 +142,39 @@ class TracingBackendUnitTest(unittest.TestCase):
     # a TracingTimeoutException.
     with self.assertRaises(tracing_backend.TracingTimeoutException):
       backend._CollectTracingData(trace_data_builder, 10)
-    trace_events = trace_data_builder.AsData().GetTraceFor(
-        trace_data.CHROME_TRACE_PART).get('traceEvents', [])
-    self.assertEqual(2, len(trace_events))
+    traces = self._GetRawChromeTracesFor(trace_data_builder)
+    self.assertEqual(2, len(traces))
+    self.assertEqual(1, len(traces[0].get('traceEvents', [])))
+    self.assertEqual(1, len(traces[1].get('traceEvents', [])))
     self.assertFalse(backend._has_received_all_tracing_data)
 
   def testCollectTracingDataNoTimeout(self):
     self._inspector_socket.AddEvent(
-        'Tracing.dataCollected', {'value': [{'ph': 'B'}]}, 9)
+        'Tracing.dataCollected', {'value': {'traceEvents': [{'ph': 'B'}]}}, 9)
     self._inspector_socket.AddEvent(
-        'Tracing.dataCollected', {'value': [{'ph': 'E'}]}, 14)
+        'Tracing.dataCollected', {'value': {'traceEvents': [{'ph': 'E'}]}}, 14)
     self._inspector_socket.AddEvent('Tracing.tracingComplete', {}, 19)
     backend = tracing_backend.TracingBackend(self._inspector_socket)
     trace_data_builder = trace_data.TraceDataBuilder()
     backend._CollectTracingData(trace_data_builder, 10)
-    trace_events = trace_data_builder.AsData().GetTraceFor(
-        trace_data.CHROME_TRACE_PART).get('traceEvents', [])
-    self.assertEqual(2, len(trace_events))
+    traces = self._GetRawChromeTracesFor(trace_data_builder)
+    self.assertEqual(2, len(traces))
+    self.assertEqual(1, len(traces[0].get('traceEvents', [])))
+    self.assertEqual(1, len(traces[1].get('traceEvents', [])))
     self.assertTrue(backend._has_received_all_tracing_data)
 
   def testCollectTracingDataFromStreamNoContainer(self):
     self._inspector_socket.AddEvent(
         'Tracing.tracingComplete', {'stream': '42'}, 1)
     self._inspector_socket.AddAsyncResponse(
-        'IO.read', {'data': '[{},{},{'}, 2)
+        'IO.read', {'data': '{"traceEvents": [{},{},{'}, 2)
     self._inspector_socket.AddAsyncResponse(
-        'IO.read', {'data': '},{},{}]', 'eof': True}, 3)
+        'IO.read', {'data': '},{},{}]}', 'eof': True}, 3)
     backend = tracing_backend.TracingBackend(self._inspector_socket)
     trace_data_builder = trace_data.TraceDataBuilder()
     backend._CollectTracingData(trace_data_builder, 10)
-    trace_events = trace_data_builder.AsData().GetTraceFor(
-        trace_data.CHROME_TRACE_PART).get('traceEvents', [])
+    trace_events = self._GetRawChromeTracesFor(trace_data_builder)[0].get(
+        'traceEvents', [])
     self.assertEqual(5, len(trace_events))
     self.assertTrue(backend._has_received_all_tracing_data)
 
@@ -180,8 +190,7 @@ class TracingBackendUnitTest(unittest.TestCase):
     backend = tracing_backend.TracingBackend(self._inspector_socket)
     trace_data_builder = trace_data.TraceDataBuilder()
     backend._CollectTracingData(trace_data_builder, 10)
-    data = trace_data_builder.AsData()
-    chrome_trace = data.GetTraceFor(trace_data.CHROME_TRACE_PART)
+    chrome_trace = self._GetRawChromeTracesFor(trace_data_builder)[0]
 
     self.assertEqual(3, len(chrome_trace.get('traceEvents', [])))
     self.assertEqual(dict, type(chrome_trace.get('metadata')))
@@ -236,34 +245,36 @@ class TracingBackendUnitTest(unittest.TestCase):
 
 class DevToolsStreamPerformanceTest(unittest.TestCase):
   def setUp(self):
-    self._mock_timer = simple_mock.MockTimer(tracing_backend)
-    self._inspector_socket = fakes.FakeInspectorWebsocket(self._mock_timer)
+    self._fake_timer = fakes.FakeTimer(tracing_backend)
+    self._inspector_socket = fakes.FakeInspectorWebsocket(self._fake_timer)
 
   def _MeasureReadTime(self, count):
-    mock_time = self._mock_timer.time() + 1
+    fake_time = self._fake_timer.time() + 1
     payload = ','.join(['{}'] * 5000)
     self._inspector_socket.AddAsyncResponse('IO.read', {'data': '[' + payload},
-                                            mock_time)
-    startClock = timeit.default_timer()
+                                            fake_time)
+    start_clock = timeit.default_timer()
 
     done = {'done': False}
-    def mark_done(data):
+    def MarkDone(data):
       del data  # unused
       done['done'] = True
 
     reader = _DevToolsStreamReader(self._inspector_socket, 'dummy')
-    reader.Read(mark_done)
+    reader.Read(MarkDone)
     while not done['done']:
-      mock_time += 1
+      fake_time += 1
       if count > 0:
-        self._inspector_socket.AddAsyncResponse('IO.read', {'data': payload},
-            mock_time)
+        self._inspector_socket.AddAsyncResponse(
+            'IO.read', {'data': payload},
+            fake_time)
       elif count == 0:
-        self._inspector_socket.AddAsyncResponse('IO.read',
-            {'data': payload + ']', 'eof': True}, mock_time)
+        self._inspector_socket.AddAsyncResponse(
+            'IO.read',
+            {'data': payload + ']', 'eof': True}, fake_time)
       count -= 1
       self._inspector_socket.DispatchNotifications(10)
-    return timeit.default_timer() - startClock
+    return timeit.default_timer() - start_clock
 
   def testReadTime(self):
     n1 = 1000
@@ -274,5 +285,5 @@ class DevToolsStreamPerformanceTest(unittest.TestCase):
       n1 *= 5
     t2 = self._MeasureReadTime(n1 * 10)
     # Time is an illusion, CPU time is doubly so, allow great deal of tolerance.
-    toleranceFactor = 5
-    self.assertLess(t2, t1 * 10 * toleranceFactor)
+    tolerance_factor = 5
+    self.assertLess(t2, t1 * 10 * tolerance_factor)

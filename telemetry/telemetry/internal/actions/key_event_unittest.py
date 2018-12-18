@@ -4,6 +4,7 @@
 
 import time
 
+from telemetry import decorators
 from telemetry.internal.actions import key_event
 from telemetry.internal.actions import utils
 from telemetry.testing import tab_test_case
@@ -30,9 +31,12 @@ class KeyPressActionTest(tab_test_case.TabTestCase):
     self.Navigate('blank.html')
     utils.InjectJavaScript(self._tab, 'gesture_common.js')
 
+  # https://github.com/catapult-project/catapult/issues/3099
+  @decorators.Disabled('android')
   def testPressEndAndHome(self):
     # Make page taller than the window so it's scrollable.
-    self._tab.ExecuteJavaScript('document.body.style.height ='
+    self._tab.ExecuteJavaScript(
+        'document.body.style.height ='
         '(3 * __GestureCommon_GetWindowHeight() + 1) + "px";')
 
     # Check that the browser is currently showing the top of the page and that
@@ -46,8 +50,8 @@ class KeyPressActionTest(tab_test_case.TabTestCase):
     time.sleep(1)
 
     # We can only expect the bottom scroll position to be approximatly equal.
-    self.assertAlmostEqual(2 * self._window_height, self._scroll_position,
-                           delta=20)
+    self.assertAlmostEqual(
+        2 * self._window_height, self._scroll_position, delta=20)
 
     self._PressKey('Home')
 
@@ -77,7 +81,7 @@ class KeyPressActionTest(tab_test_case.TabTestCase):
 
     # Check that the contents of the textarea is correct. It might take a second
     # until all keystrokes have been handled by the browser (crbug.com/630017).
-    self._tab.WaitForJavaScriptExpression(
+    self._tab.WaitForJavaScriptCondition(
         'document.querySelector("textarea").value === "Hello,\\nWorld!"',
         timeout=1)
 

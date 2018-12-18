@@ -27,7 +27,7 @@ of alerts:
    means the code failed, and we send an alert. You'll want to search the code
    for the call to tick the metric with that name, so you can understand where
    the likely failure is.
-2. **Metric Threshold on Task Queue add-point-queue**. When this happens, we are
+2. **Metric Threshold on Task Queue new-points-queue**. When this happens, we are
    seeing too many errors adding data to the datastore in `add_point_queue.py`.
 
 **Analyze the logs for errors**. Once you have a basic idea what codepath is
@@ -54,11 +54,9 @@ If it's necessary at some point to have scheduled downtime, announce
 it ahead of time. At least 2 days before the downtime (ideally more),
 announce in these ways:
 
- 1. Use [/set\_warning\_message](https://chromeperf.appspot.com/set_warning_message) to
-    put a warning message on the dashboard itself.
- 2. Send an email to any Chromium perf sheriffs who will be affected,
+ 1. Send an email to any Chromium perf sheriffs who will be affected,
     or all perf sheriffs (`perf-sheriffs@chromium.org`).
- 3. Send an email to `chrome-perf-dashboard-announce@google.com`.
+ 2. Send an email to `chrome-perf-dashboard-announce@google.com`.
 
 If possible, it's probably best to schedule it for Saturday, when usage
 is likely to be relatively low.
@@ -98,8 +96,6 @@ fields that need to be filled out:
    there’s nothing stopping it from being an individual’s email
    account. It must be specified if there is no Rotation URL, but it’s
    optional otherwise.
- - **Days before alerting on missing data**:
-   Number of days before "stoppage alerts" are made; -1 for no alerts. 
  - **Internal-only**: If the tests this sheriff is monitoring are internal-only,
    or the name of the sheriff rotation is sensitive, please
    set this to "Yes". If set to "Yes", the sheriff rotation will only
@@ -192,6 +188,4 @@ unit test with the JSON to `add_point_test.py` and debug it from there.
 The bot whitelist is a list of bot names which are publicly visible. If a
 bot is not on the list, users must be logged into google.com accounts to
 see the data for that bot. You can add or remove a bot from the whitelist
-at [/bot\_whitelist](https://chromeperf.appspot.com/bot_whitelist),
-and make a bot’s existing data publicly visible (or internal\_only)
-at [/change\_internal\_only](https://chromeperf.appspot.com/change_internal_only).
+using the dev console by importing `dashboard.change_internal_only`.

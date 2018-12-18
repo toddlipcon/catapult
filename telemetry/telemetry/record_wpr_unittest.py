@@ -21,7 +21,8 @@ class MockPage(page_module.Page):
   def __init__(self, story_set, url):
     super(MockPage, self).__init__(url=url,
                                    page_set=story_set,
-                                   base_dir=util.GetUnittestDataDir())
+                                   base_dir=util.GetUnittestDataDir(),
+                                   name=url)
     self.func_calls = []
 
   def RunNavigateSteps(self, action_runner):
@@ -144,6 +145,8 @@ class RecordWprUnitTests(tab_test_case.TabTestCase):
     flags = ['--browser', self._browser.browser_type,
              '--remote', self._test_options.cros_remote,
              '--device', self._device]
+    if self._browser.browser_type == 'exact':
+      flags += ['--browser-executable', self._test_options.browser_executable]
     if self._test_options.chrome_root:
       flags += ['--chrome-root', self._test_options.chrome_root]
     return flags
@@ -194,14 +197,14 @@ class RecordWprUnitTests(tab_test_case.TabTestCase):
 
   def testCommandLineFlags(self):
     flags = [
-        '--page-repeat', '2',
+        '--pageset-repeat', '2',
         '--mock-benchmark-url', self._url,
         '--upload',
     ]
     wpr_recorder = record_wpr.WprRecorder(self._test_data_dir, MockBenchmark(),
                                           flags)
     # page_runner command-line args
-    self.assertEquals(2, wpr_recorder.options.page_repeat)
+    self.assertEquals(2, wpr_recorder.options.pageset_repeat)
     # benchmark command-line args
     self.assertEquals(self._url, wpr_recorder.options.mock_benchmark_url)
     # record_wpr command-line arg to upload to cloud-storage.

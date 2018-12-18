@@ -6,6 +6,7 @@
 
 import json
 import logging
+import re
 
 from google.appengine.api import app_identity
 from google.appengine.api import urlfetch
@@ -13,13 +14,20 @@ from google.appengine.api import users
 from google.appengine.ext import ndb
 
 from dashboard import auto_bisect
-from dashboard import issue_tracker_service
 from dashboard import oauth2_decorator
-from dashboard import request_handler
-from dashboard import utils
-from dashboard.models import alert
+from dashboard import short_uri
+from dashboard.common import namespaced_stored_object
+from dashboard.common import request_handler
+from dashboard.common import utils
 from dashboard.models import bug_data
 from dashboard.models import bug_label_patterns
+from dashboard.models import histogram
+from dashboard.services import crrev_service
+from dashboard.services import gitiles_service
+from dashboard.services import issue_tracker_service
+
+from tracing.value.diagnostics import reserved_infos
+
 
 # A list of bug labels to suggest for all performance regression bugs.
 _DEFAULT_LABELS = [
@@ -53,14 +61,9 @@ class FileBugHandler(request_handler.RequestHandler):
       HTML, using the template 'bug_result.html'.
     """
     if not utils.IsValidSheriffUser():
-      # TODO(qyearsley): Simplify this message (after a couple months).
       self.RenderHtml('bug_result.html', {
-          'error': ('You must be logged in with a chromium.org account '
-                    'in order to file bugs here! This is the case ever '
-                    'since we switched to the Monorail issue tracker. '
-                    'Note, viewing internal data should work for Googlers '
-                    'that are logged in with the Chromium accounts. See '
-                    'https://github.com/catapult-project/catapult/issues/2042')
+          'error': 'You must be logged in with a chromium.org account '
+                   'to file bugs.'
       })
       return
 
@@ -90,13 +93,15 @@ class FileBugHandler(request_handler.RequestHandler):
     """
     alert_keys = [ndb.Key(urlsafe=k) for k in urlsafe_keys.split(',')]
     labels, components = _FetchLabelsAndComponents(alert_keys)
+    owner_components = _FetchBugComponents(alert_keys)
+
     self.RenderHtml('bug_result.html', {
         'bug_create_form': True,
         'keys': urlsafe_keys,
         'summary': summary,
         'description': description,
         'labels': labels,
-        'components': components,
+        'components': components.union(owner_components),
         'owner': '',
         'cc': users.get_current_user(),
     })
@@ -111,6 +116,14 @@ class FileBugHandler(request_handler.RequestHandler):
       components: List of component strings for the new bug.
       urlsafe_keys: Comma-separated alert keys in urlsafe format.
     """
+    # Only project members (@chromium.org accounts) can be owners of bugs.
+    owner = self.request.get('owner')
+    if owner and not owner.endswith('@chromium.org'):
+      self.RenderHtml('bug_result.html', {
+          'error': 'Owner email address must end with @chromium.org.'
+      })
+      return
+
     alert_keys = [ndb.Key(urlsafe=k) for k in urlsafe_keys.split(',')]
     alerts = ndb.get_multi(alert_keys)
 
@@ -121,57 +134,104 @@ class FileBugHandler(request_handler.RequestHandler):
     if milestone_label:
       labels.append(milestone_label)
 
-    # Only project members (@chromium.org accounts) can be owners of bugs.
-    owner = self.request.get('owner')
-    if owner and not owner.endswith('@chromium.org'):
-      self.RenderHtml('bug_result.html', {
-          'error': 'Owner email address must end with @chromium.org.'
-      })
-      return
-
     cc = self.request.get('cc')
 
     http = oauth2_decorator.DECORATOR.http()
-    service = issue_tracker_service.IssueTrackerService(http)
+    user_issue_tracker_service = issue_tracker_service.IssueTrackerService(http)
 
-    bug_id = service.NewBug(
+    new_bug_response = user_issue_tracker_service.NewBug(
         summary, description, labels=labels, components=components, owner=owner,
         cc=cc)
-    if not bug_id:
-      self.RenderHtml('bug_result.html', {'error': 'Error creating bug!'})
+    if 'error' in new_bug_response:
+      self.RenderHtml('bug_result.html', {'error': new_bug_response['error']})
       return
 
+    bug_id = new_bug_response['bug_id']
     bug_data.Bug(id=bug_id).put()
-    for alert_entity in alerts:
-      alert_entity.bug_id = bug_id
+
+    for a in alerts:
+      a.bug_id = bug_id
+
     ndb.put_multi(alerts)
 
     comment_body = _AdditionalDetails(bug_id, alerts)
-    service.AddBugComment(bug_id, comment_body)
+    # Add the bug comment with the service account, so that there are no
+    # permissions issues.
+    dashboard_issue_tracker_service = issue_tracker_service.IssueTrackerService(
+        utils.ServiceAccountHttp())
+    dashboard_issue_tracker_service.AddBugComment(bug_id, comment_body)
 
     template_params = {'bug_id': bug_id}
     if all(k.kind() == 'Anomaly' for k in alert_keys):
-      bisect_result = auto_bisect.StartNewBisectForBug(bug_id)
-      if 'error' in bisect_result:
-        template_params['bisect_error'] = bisect_result['error']
+      logging.info('Kicking bisect for bug ' + str(bug_id))
+      culprit_rev = _GetSingleCLForAnomalies(alerts)
+      if culprit_rev is not None:
+        _AssignBugToCLAuthor(bug_id, alerts[0], dashboard_issue_tracker_service)
       else:
-        template_params.update(bisect_result)
+        bisect_result = auto_bisect.StartNewBisectForBug(bug_id)
+        if 'error' in bisect_result:
+          logging.info('Failed to kick bisect for ' + str(bug_id))
+          template_params['bisect_error'] = bisect_result['error']
+        else:
+          logging.info('Successfully kicked bisect for ' + str(bug_id))
+          template_params.update(bisect_result)
+    else:
+      kinds = set()
+      for k in alert_keys:
+        kinds.add(k.kind())
+      logging.info(
+          'Didn\'t kick bisect for bug id %s because alerts had kinds %s',
+          bug_id, list(kinds))
+
     self.RenderHtml('bug_result.html', template_params)
+
+
+def _GetDocsForTest(test):
+  test_suite = utils.TestKey('/'.join(test.id().split('/')[:3]))
+
+  docs = histogram.SparseDiagnostic.GetMostRecentDataByNamesSync(
+      test_suite, [reserved_infos.DOCUMENTATION_URLS.name])
+
+  if not docs:
+    return None
+
+  docs = docs[reserved_infos.DOCUMENTATION_URLS.name].get('values')
+  return docs[0]
 
 
 def _AdditionalDetails(bug_id, alerts):
   """Returns a message with additional information to add to a bug."""
   base_url = '%s/group_report' % _GetServerURL()
   bug_page_url = '%s?bug_id=%s' % (base_url, bug_id)
-  alerts_url = '%s?keys=%s' % (base_url, _UrlsafeKeys(alerts))
-  comment = 'All graphs for this bug:\n  %s\n\n' % bug_page_url
-  comment += 'Original alerts at time of bug-filing:\n  %s\n' % alerts_url
-  bot_names = alert.GetBotNamesFromAlerts(alerts)
+  sid = short_uri.GetOrCreatePageState(json.dumps(_UrlsafeKeys(alerts)))
+  alerts_url = '%s?sid=%s' % (base_url, sid)
+  comment = '<b>All graphs for this bug:</b>\n  %s\n\n' % bug_page_url
+  comment += ('(For debugging:) Original alerts at time of bug-filing:\n  %s\n'
+              % alerts_url)
+  bot_names = {a.bot_name for a in alerts}
   if bot_names:
     comment += '\n\nBot(s) for this bug\'s original alert(s):\n\n'
     comment += '\n'.join(sorted(bot_names))
   else:
     comment += '\nCould not extract bot names from the list of alerts.'
+
+  docs_by_suite = {}
+  for a in alerts:
+    test = a.GetTestMetadataKey()
+
+    suite = test.id().split('/')[2]
+    if suite in docs_by_suite:
+      continue
+
+    docs = _GetDocsForTest(test)
+    if not docs:
+      continue
+
+    docs_by_suite[suite] = docs
+
+  for k, v in docs_by_suite.iteritems():
+    comment += '\n\n%s - %s:\n  %s' % (k, v[0], v[1])
+
   return comment
 
 
@@ -180,7 +240,7 @@ def _GetServerURL():
 
 
 def _UrlsafeKeys(alerts):
-  return ','.join(a.key.urlsafe() for a in alerts)
+  return [a.key.urlsafe() for a in alerts]
 
 
 def _ComponentFromCrLabel(label):
@@ -213,20 +273,53 @@ def _FetchLabelsAndComponents(alert_keys):
         labels.add(item)
   return labels, components
 
+def _FetchBugComponents(alert_keys):
+  """Fetches the ownership bug components of the most recent alert on a per-test
+     path basis from the given alert keys.
+  """
+  alerts = ndb.get_multi(alert_keys)
+  sorted_alerts = reversed(sorted(alerts, key=lambda alert: alert.timestamp))
+
+  most_recent_components = {}
+
+  for alert in sorted_alerts:
+    alert_test = alert.test.id()
+    if (alert.ownership and alert.ownership.get('component') and
+        most_recent_components.get(alert_test) is None):
+      if isinstance(alert.ownership['component'], list):
+        most_recent_components[alert_test] = alert.ownership['component'][0]
+      else:
+        most_recent_components[alert_test] = alert.ownership['component']
+
+  return set(most_recent_components.values())
 
 def _MilestoneLabel(alerts):
-  """Returns a milestone label string, or None."""
-  revisions = [a.start_revision for a in alerts if hasattr(a, 'start_revision')]
+  """Returns a milestone label string, or None.
+
+  Because revision numbers for other repos may not be easily reconcilable with
+  Chromium milestones, do not label them (see
+  https://github.com/catapult-project/catapult/issues/2906).
+  """
+  revisions = [a.end_revision for a in alerts if hasattr(a, 'end_revision')]
   if not revisions:
     return None
-  start_revision = min(revisions)
+  end_revision = min(revisions)
+  for a in alerts:
+    if a.end_revision == end_revision:
+      row_key = utils.GetRowKey(a.test, a.end_revision)
+      row = row_key.get()
+      if hasattr(row, 'r_commit_pos'):
+        end_revision = row.r_commit_pos
+      else:
+        return None
+      break
   try:
-    milestone = _GetMilestoneForRevision(start_revision)
+    milestone = _GetMilestoneForRevision(end_revision)
   except KeyError:
     logging.error('List of versions not in the expected format')
   if not milestone:
     return None
-  logging.info('Matched rev %s to milestone %s.', start_revision, milestone)
+  logging.info('Matched rev %s to milestone %s.', end_revision, milestone)
   return 'M-%d' % milestone
 
 
@@ -237,7 +330,7 @@ def _GetMilestoneForRevision(revision):
   by a suspected regression. We do this by locating in the list of current
   versions, regardless of platform and channel, all the version strings (e.g.
   36.0.1234.56) that match revisions (commit positions) later than the earliest
-  possible start_revision of the suspected regression; we then parse out the
+  possible end_revision of the suspected regression; we then parse out the
   first numeric part of such strings, assume it to be the corresponding
   milestone, and return the lowest one in the set.
 
@@ -285,3 +378,59 @@ def _GetAllCurrentVersionsFromOmahaProxy():
   except ValueError:
     logging.error('OmahaProxy did not return valid JSON.')
   return []
+
+
+def _GetSingleCLForAnomalies(alerts):
+  """If all anomalies were caused by the same culprit, return it. Else None."""
+  revision = alerts[0].start_revision
+  if not all(a.start_revision == revision and
+             a.end_revision == revision for a in alerts):
+    return None
+  return revision
+
+def _AssignBugToCLAuthor(bug_id, alert, service):
+  """Assigns the bug to the author of the given revision."""
+  repository_url = None
+  repositories = namespaced_stored_object.Get('repositories')
+  test_path = utils.TestPath(alert.test)
+  if test_path.startswith('ChromiumPerf'):
+    repository_url = repositories['chromium']['repository_url']
+  elif test_path.startswith('ClankInternal'):
+    repository_url = repositories['clank']['repository_url']
+  if not repository_url:
+    # Can't get committer info from this repository.
+    return
+
+  rev = str(auto_bisect.GetRevisionForBisect(alert.end_revision, alert.test))
+  # TODO(sullivan, dtu): merge this with similar pinoint code.
+  if (re.match(r'^[0-9]{5,7}$', rev) and
+      repository_url == repositories['chromium']['repository_url']):
+    # This is a commit position, need the git hash.
+    result = crrev_service.GetNumbering(
+        number=rev,
+        numbering_identifier='refs/heads/master',
+        numbering_type='COMMIT_POSITION',
+        project='chromium',
+        repo='chromium/src')
+    rev = result['git_sha']
+  if not re.match(r'[a-fA-F0-9]{40}$', rev):
+    # This still isn't a git hash; can't assign bug.
+    return
+
+  commit_info = gitiles_service.CommitInfo(repository_url, rev)
+  author = commit_info['author']['email']
+  sheriff = utils.GetSheriffForAutorollCommit(commit_info)
+  if sheriff:
+    service.AddBugComment(
+        bug_id,
+        ('Assigning to sheriff %s because this autoroll is '
+         'the only CL in range:\n%s') % (sheriff, commit_info['message']),
+        status='Assigned',
+        owner=sheriff)
+  else:
+    service.AddBugComment(
+        bug_id,
+        'Assigning to %s because this is the only CL in range:\n%s' % (
+            author, commit_info['message']),
+        status='Assigned',
+        owner=author)

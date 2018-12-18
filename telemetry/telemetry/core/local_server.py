@@ -12,7 +12,6 @@ import subprocess
 import sys
 
 from telemetry.core import util
-from telemetry.internal import forwarders
 
 NamedPort = collections.namedtuple('NamedPort', ['name', 'port'])
 
@@ -49,11 +48,11 @@ class LocalServer(object):
     self._subprocess = None
     self._devnull = None
     self._local_server_controller = None
-    self.forwarder = None
     self.host_ip = None
+    self.port = None
 
   def Start(self, local_server_controller):
-    assert self._subprocess == None
+    assert self._subprocess is None
     self._local_server_controller = local_server_controller
 
     self.host_ip = local_server_controller.host_ip
@@ -88,15 +87,13 @@ class LocalServer(object):
         http_port = p.port
     assert http_port and len(named_ports) == 1, (
         'Only http port is supported: %s' % named_ports)
-    self.forwarder = local_server_controller.CreateForwarder(
-        forwarders.PortPair(http_port,
-                            local_server_controller.GetRemotePort(http_port)))
+    self.port = http_port
 
   def _GetNamedPortsFromBackend(self):
     named_ports_json = None
     named_ports_re = re.compile('LocalServerBackend started: (?P<port>.+)')
     # TODO: This will hang if the subprocess doesn't print the correct output.
-    while self._subprocess.poll() == None:
+    while self._subprocess.poll() is None:
       m = named_ports_re.match(self._subprocess.stdout.readline())
       if m:
         named_ports_json = m.group('port')
@@ -121,9 +118,6 @@ class LocalServer(object):
     self.Close()
 
   def Close(self):
-    if self.forwarder:
-      self.forwarder.Close()
-      self.forwarder = None
     if self._subprocess:
       # TODO(tonyg): Should this block until it goes away?
       self._subprocess.kill()
@@ -155,10 +149,11 @@ class LocalServerController(object):
 
   def StartServer(self, server):
     assert not server.is_running, 'Server already started'
+    assert self._platform_backend.network_controller_backend.is_open
     assert isinstance(server, LocalServer)
     if server.__class__ in self._local_servers_by_class:
       raise Exception(
-          'Canont have two servers of the same class running at once. ' +
+          'Cannot have two servers of the same class running at once. ' +
           'Locate the existing one and use it, or call Close() on it.')
 
     server.Start(self)
@@ -176,12 +171,9 @@ class LocalServerController(object):
       server = self._local_servers_by_class.itervalues().next()
       try:
         server.Close()
-      except Exception:
+      except Exception: # pylint: disable=broad-except
         import traceback
         traceback.print_exc()
-
-  def CreateForwarder(self, port_pair):
-    return self._platform_backend.forwarder_factory.Create(port_pair)
 
   def GetRemotePort(self, port):
     return self._platform_backend.GetRemotePort(port)
@@ -220,6 +212,7 @@ if __name__ == '__main__':
   # This trick is needed because local_server.NamedPort is not the
   # same as sys.modules['__main__'].NamedPort. The module itself is loaded
   # twice, basically.
+  # pylint: disable=wrong-import-position
   from telemetry.core import local_server  # pylint: disable=import-self
   sys.exit(
       local_server._LocalServerBackendMain(  # pylint: disable=protected-access

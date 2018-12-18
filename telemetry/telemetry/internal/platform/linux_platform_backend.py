@@ -5,6 +5,7 @@
 import logging
 import os
 import platform
+import shlex
 import subprocess
 import sys
 
@@ -16,13 +17,20 @@ from telemetry.core import util
 from telemetry import decorators
 from telemetry.internal.platform import linux_based_platform_backend
 from telemetry.internal.platform import posix_platform_backend
-from telemetry.internal.platform.power_monitor import msr_power_monitor
 
 
 _POSSIBLE_PERFHOST_APPLICATIONS = [
-  'perfhost_precise',
-  'perfhost_trusty',
+    'perfhost_precise',
+    'perfhost_trusty',
 ]
+
+
+def _GetOSVersion(value):
+  try:
+    return float(value)
+  except (TypeError, ValueError):
+    logging.error('Unrecognizable OS version: %s. Will fallback to 0.0', value)
+    return 0.0
 
 
 class LinuxPlatformBackend(
@@ -30,7 +38,6 @@ class LinuxPlatformBackend(
     linux_based_platform_backend.LinuxBasedPlatformBackend):
   def __init__(self):
     super(LinuxPlatformBackend, self).__init__()
-    self._power_monitor = msr_power_monitor.MsrPowerMonitorLinux(self)
 
   @classmethod
   def IsPlatformBackendForHost(cls):
@@ -49,25 +56,45 @@ class LinuxPlatformBackend(
   def GetOSName(self):
     return 'linux'
 
+  def _ReadReleaseFile(self, file_path):
+    if not os.path.exists(file_path):
+      return None
+
+    release_data = {}
+    for line in self.GetFileContents(file_path).splitlines():
+      key, _, value = line.partition('=')
+      release_data[key] = ' '.join(shlex.split(value.strip()))
+    return release_data
+
   @decorators.Cache
   def GetOSVersionName(self):
-    if not os.path.exists('/etc/lsb-release'):
-      raise NotImplementedError('Unknown Linux OS version')
+    # First try os-release(5).
+    for path in ('/etc/os-release', '/usr/lib/os-release'):
+      os_release = self._ReadReleaseFile(path)
+      if os_release:
+        codename = os_release.get('ID', 'linux')
+        version = _GetOSVersion(os_release.get('VERSION_ID'))
+        return os_version.OSVersion(codename, version)
 
-    codename = None
-    version = None
-    for line in self.GetFileContents('/etc/lsb-release').splitlines():
-      key, _, value = line.partition('=')
-      if key == 'DISTRIB_CODENAME':
-        codename = value.strip()
-      elif key == 'DISTRIB_RELEASE':
-        try:
-          version = float(value)
-        except ValueError:
-          version = 0
-      if codename and version:
-        break
-    return os_version.OSVersion(codename, version)
+    # Use lsb-release as a fallback.
+    lsb_release = self._ReadReleaseFile('/etc/lsb-release')
+    if lsb_release:
+      codename = lsb_release.get('DISTRIB_CODENAME')
+      version = _GetOSVersion(lsb_release.get('DISTRIB_RELEASE'))
+      return os_version.OSVersion(codename, version)
+
+    raise NotImplementedError('Unknown Linux OS version')
+
+  def GetOSVersionDetailString(self):
+    return ''  # TODO(kbr): Implement this.
+
+  def CanTakeScreenshot(self):
+    return_code = subprocess.call(['which', 'gnome-screenshot'])
+    return return_code == 0
+
+  def TakeScreenshot(self, file_path):
+    return_code = subprocess.call(['gnome-screenshot', '-f', file_path])
+    return return_code == 0
 
   def CanFlushIndividualFilesFromSystemCache(self):
     return True
@@ -97,29 +124,10 @@ class LinuxPlatformBackend(
           'Please teach Telemetry how to install ' + application)
 
   def CanMonitorPower(self):
-    return self._power_monitor.CanMonitorPower()
+    return False
 
   def CanMeasurePerApplicationPower(self):
-    return self._power_monitor.CanMeasurePerApplicationPower()
-
-  def StartMonitoringPower(self, browser):
-    self._power_monitor.StartMonitoringPower(browser)
-
-  def StopMonitoringPower(self):
-    return self._power_monitor.StopMonitoringPower()
-
-  def ReadMsr(self, msr_number, start=0, length=64):
-    cmd = ['rdmsr', '-d', str(msr_number)]
-    (out, err) = subprocess.Popen(cmd,
-                                  stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE).communicate()
-    if err:
-      raise OSError(err)
-    try:
-      result = int(out)
-    except ValueError:
-      raise OSError('Cannot interpret rdmsr output: %s' % out)
-    return result >> start & ((1 << length) - 1)
+    return False
 
   def _IsIpfwKernelModuleInstalled(self):
     return 'ipfw_mod' in subprocess.Popen(

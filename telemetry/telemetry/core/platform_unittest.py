@@ -3,10 +3,14 @@
 # found in the LICENSE file.
 
 import os
+import unittest
 import tempfile
+
+import py_utils
 
 from telemetry import decorators
 from telemetry.core import os_version
+from telemetry.core import platform
 from telemetry.util import image_util
 from telemetry.testing import tab_test_case
 
@@ -19,7 +23,7 @@ class PlatformScreenshotTest(tab_test_case.TabTestCase):
 
   # Run this test in serial to avoid multiple browsers pop up on the screen.
   @decorators.Isolated
-  @decorators.Disabled('linux')  # crbug.com/563656
+  @decorators.Disabled('mac')  # crbug.com/660587
   def testScreenshot(self):
     if not self._platform.CanTakeScreenshot():
       self.skipTest('Platform does not support screenshots, skipping test.')
@@ -42,3 +46,11 @@ class PlatformScreenshotTest(tab_test_case.TabTestCase):
       self.assertTrue(special_colored_pixel in screenshot_pixels)
     finally:
       os.remove(tf.name)
+
+
+class TestHostPlatformInfo(unittest.TestCase):
+  def testConsistentHostPlatformInfo(self):
+    self.assertEquals(platform.GetHostPlatform().GetOSName(),
+                      py_utils.GetHostOsName())
+    self.assertEquals(platform.GetHostPlatform().GetArchName(),
+                      py_utils.GetHostArchName())

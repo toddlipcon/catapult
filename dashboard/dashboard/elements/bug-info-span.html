@@ -6,7 +6,6 @@ found in the LICENSE file.
 -->
 <!--
 The bug-info-span is a in-line element showing a bug ID with link, etc.
-TODO(qyearsley): Expand this element and use it in chart-tooltip.
 -->
 
 <link rel="import" href="/dashboard/elements/alert-remove-box.html">
@@ -46,15 +45,11 @@ TODO(qyearsley): Expand this element and use it in chart-tooltip.
 
       computeIsPositive: n => n > 0,
 
-      statusString: function() {
-        if (this.bugId == -1)
-          return 'Invalid';
-        else if (this.bugId == -2)
-          return 'Ignored';
-        else if (this.recovered)
-          return 'Recovered';
-        else
-          return '';
+      statusString() {
+        if (this.bugId == -1) return 'Invalid';
+        if (this.bugId == -2) return 'Ignored';
+        if (this.recovered) return 'Recovered';
+        return '';
       }
     });
   </script>

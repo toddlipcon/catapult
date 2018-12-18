@@ -8,12 +8,13 @@ import webapp2
 import webtest
 
 from dashboard import migrate_test_names
-from dashboard import testing_common
-from dashboard import utils
+from dashboard.common import testing_common
+from dashboard.common import utils
 from dashboard.models import anomaly
 from dashboard.models import graph_data
+from dashboard.models import histogram
 from dashboard.models import sheriff
-from dashboard.models import stoppage_alert
+from tracing.value.diagnostics import generic_set
 
 # Masters, bots and test names to add to the mock datastore.
 _MOCK_DATA = [
@@ -44,6 +45,8 @@ class MigrateTestNamesTest(testing_common.TestCase):
     self.testapp = webtest.TestApp(app)
     # Make sure puts get split up into multiple calls.
     migrate_test_names._MAX_DATASTORE_PUTS_PER_PUT_MULTI_CALL = 30
+    self.SetCurrentUser('internal@foo.bar')
+    testing_common.SetIsInternalUser('internal@foo.bar', True)
 
   def _AddMockData(self):
     """Adds sample TestMetadata, Row, and Anomaly entities."""
@@ -57,9 +60,17 @@ class MigrateTestNamesTest(testing_common.TestCase):
     for rev in range(15000, 15100, 2):
       graph_data.Row(id=rev, parent=test_container_key, value=(rev * 2)).put()
       if rev % 50 == 0:
+        data = generic_set.GenericSet(['foo_%s' % rev])
+        data = data.AsDict()
         anomaly.Anomaly(
             start_revision=(rev - 2), end_revision=rev,
             median_before_anomaly=100, median_after_anomaly=50,
+            test=test_key).put()
+        histogram.SparseDiagnostic(
+            test=test_key,
+            start_revision=rev - 50, end_revision=rev - 1,
+            data=data).put()
+        histogram.Histogram(
             test=test_key).put()
 
   def _CheckRows(self, test_path, multiplier=2):
@@ -80,6 +91,9 @@ class MigrateTestNamesTest(testing_common.TestCase):
     self.assertEqual(15098, rows[49].revision)
     self.assertEqual(15098 * multiplier, rows[49].value)
 
+    t = utils.TestKey(test_path).get()
+    self.assertTrue(t.has_rows)
+
   def _CheckAnomalies(self, test_path, r1=15000, r2=15050):
     """Checks whether the anomalies match the ones added in _AddMockData.
 
@@ -94,6 +108,15 @@ class MigrateTestNamesTest(testing_common.TestCase):
     self.assertEqual(2, len(anomalies))
     self.assertEqual(r1, anomalies[0].end_revision)
     self.assertEqual(r2, anomalies[1].end_revision)
+
+  def _CheckHistogramData(self, test_path):
+    diagnostics = histogram.SparseDiagnostic.query(
+        histogram.SparseDiagnostic.test == utils.TestKey(test_path)).fetch()
+    self.assertEqual(2, len(diagnostics))
+
+    histograms = histogram.SparseDiagnostic.query(
+        histogram.Histogram.test == utils.TestKey(test_path)).fetch()
+    self.assertEqual(2, len(histograms))
 
   def _CheckTests(self, expected_tests):
     """Checks whether the current TestMetadata entities match the expected list.
@@ -172,6 +195,7 @@ class MigrateTestNamesTest(testing_common.TestCase):
 
     self._CheckRows('ChromiumPerf/mac/SunSpider/OverallScore/t')
     self._CheckAnomalies('ChromiumPerf/mac/SunSpider/OverallScore/t')
+    self._CheckHistogramData('ChromiumPerf/mac/SunSpider/OverallScore/t')
     expected_tests = [
         'SunSpider',
         'SunSpider/3d-cube',
@@ -198,6 +222,7 @@ class MigrateTestNamesTest(testing_common.TestCase):
 
     self._CheckRows('ChromiumPerf/mac/SunSpider1.0/Total/t')
     self._CheckAnomalies('ChromiumPerf/mac/SunSpider1.0/Total/t')
+    self._CheckHistogramData('ChromiumPerf/mac/SunSpider1.0/Total/t')
     expected_tests = [
         'SunSpider1.0',
         'SunSpider1.0/3d-cube',
@@ -225,6 +250,7 @@ class MigrateTestNamesTest(testing_common.TestCase):
     # The Row and Anomaly entities have been moved.
     self._CheckRows('ChromiumPerf/mac/SunSpider/Total')
     self._CheckAnomalies('ChromiumPerf/mac/SunSpider/Total')
+    self._CheckHistogramData('ChromiumPerf/mac/SunSpider/Total')
 
     # There is no SunSpider/Total/time any more.
     expected_tests = [
@@ -294,74 +320,54 @@ class MigrateTestNamesTest(testing_common.TestCase):
         'migrated to ChromiumPerf/win7/moz/read_operations_browser', body)
     self.assertIn('sheriffed by Perf Sheriff Win', body)
 
-  def testPost_MigratesStoppageAlerts(self):
-    testing_common.AddTests(['Master'], ['b'], {'suite': {'foo': {}}})
-    test_path = 'Master/b/suite/foo'
-    test_key = utils.TestKey(test_path)
-    test_container_key = utils.GetTestContainerKey(test_key)
-    row_key = graph_data.Row(id=100, parent=test_container_key, value=5).put()
-    stoppage_alert.CreateStoppageAlert(test_key.get(), row_key.get()).put()
-    self.assertIsNotNone(
-        stoppage_alert.GetStoppageAlert('Master/b/suite/foo', 100))
-    self.assertIsNone(
-        stoppage_alert.GetStoppageAlert('Master/b/suite/bar', 100))
-
-    self.testapp.post('/migrate_test_names', {
-        'old_pattern': 'Master/b/suite/foo',
-        'new_pattern': 'Master/b/suite/bar',
-    })
-    self.ExecuteTaskQueueTasks(
-        '/migrate_test_names', migrate_test_names._TASK_QUEUE_NAME)
-
-    self.assertIsNotNone(
-        stoppage_alert.GetStoppageAlert('Master/b/suite/bar', 100))
-    self.assertIsNone(
-        stoppage_alert.GetStoppageAlert('Master/b/suite/foo', 100))
 
   def testGetNewTestPath_WithAsterisks(self):
     self.assertEqual(
         'A/b/c/X',
-        migrate_test_names._GetNewTestPath('A/b/c/d', '*/*/*/X'))
+        migrate_test_names._ValidateAndGetNewTestPath('A/b/c/d', '*/*/*/X'))
     self.assertEqual(
         'A/b/c/d',
-        migrate_test_names._GetNewTestPath('A/b/c/d', '*/*/*/*'))
+        migrate_test_names._ValidateAndGetNewTestPath('A/b/c/d', '*/*/*/*'))
     self.assertEqual(
         'A/b/c',
-        migrate_test_names._GetNewTestPath('A/b/c/d', '*/*/*'))
+        migrate_test_names._ValidateAndGetNewTestPath('A/b/c/d', '*/*/*'))
 
   def testGetNewTestPath_WithBrackets(self):
     # Brackets are just used to delete parts of names, no other functionality.
     self.assertEqual(
         'A/b/c/x',
-        migrate_test_names._GetNewTestPath('A/b/c/xxxx', '*/*/*/[xxx]'))
+        migrate_test_names._ValidateAndGetNewTestPath(
+            'A/b/c/xxxx', '*/*/*/[xxx]'))
     self.assertEqual(
         'A/b/c',
-        migrate_test_names._GetNewTestPath('A/b/c/xxxx', '*/*/*/[xxxx]'))
+        migrate_test_names._ValidateAndGetNewTestPath(
+            'A/b/c/xxxx', '*/*/*/[xxxx]'))
     self.assertEqual(
         'A/b/c/x',
-        migrate_test_names._GetNewTestPath('A/b/c/x', '*/*/*/[]'))
+        migrate_test_names._ValidateAndGetNewTestPath('A/b/c/x', '*/*/*/[]'))
     self.assertEqual(
         'A/b/c/d',
-        migrate_test_names._GetNewTestPath('AA/bb/cc/dd', '[A]/[b]/[c]/[d]'))
+        migrate_test_names._ValidateAndGetNewTestPath(
+            'AA/bb/cc/dd', '[A]/[b]/[c]/[d]'))
 
   def testGetNewTestPath_NewPathHasDifferentLength(self):
     self.assertEqual(
         'A/b/c',
-        migrate_test_names._GetNewTestPath('A/b/c/d', 'A/*/c'))
+        migrate_test_names._ValidateAndGetNewTestPath('A/b/c/d', 'A/*/c'))
     self.assertEqual(
         'A/b/c/d',
-        migrate_test_names._GetNewTestPath('A/b/c', 'A/*/c/d'))
+        migrate_test_names._ValidateAndGetNewTestPath('A/b/c', 'A/*/c/d'))
     self.assertRaises(
         migrate_test_names.BadInputPatternError,
-        migrate_test_names._GetNewTestPath, 'A/b/c', 'A/b/c/*')
+        migrate_test_names._ValidateAndGetNewTestPath, 'A/b/c', 'A/b/c/*')
 
   def testGetNewTestPath_InvalidArgs(self):
     self.assertRaises(
         AssertionError,
-        migrate_test_names._GetNewTestPath, 'A/b/*/d', 'A/b/c/d')
+        migrate_test_names._ValidateAndGetNewTestPath, 'A/b/*/d', 'A/b/c/d')
     self.assertRaises(
         migrate_test_names.BadInputPatternError,
-        migrate_test_names._GetNewTestPath, 'A/b/c/d', 'A/b/c/d*')
+        migrate_test_names._ValidateAndGetNewTestPath, 'A/b/c/d', 'A/b/c/d*')
 
 
 if __name__ == '__main__':

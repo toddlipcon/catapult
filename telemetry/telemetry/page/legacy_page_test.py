@@ -21,13 +21,6 @@ class TestNotSupportedOnPlatformError(Exception):
   """
 
 
-class MultiTabTestAppCrashError(Exception):
-  """Exception raised after browser or tab crash for multi-tab tests.
-
-  Used to abort the test rather than try to recover from an unknown state.
-  """
-
-
 class MeasurementFailure(Failure):
   """Exception raised when an undesired but designed-for problem."""
 
@@ -57,27 +50,12 @@ class LegacyPageTest(object):
 
   __metaclass__ = trace_event.TracedMetaClass
 
-  def __init__(self,
-               needs_browser_restart_after_each_page=False,
-               clear_cache_before_each_run=False):
+  def __init__(self, clear_cache_before_each_run=False):
     super(LegacyPageTest, self).__init__()
 
     self.options = None
-    self._needs_browser_restart_after_each_page = (
-        needs_browser_restart_after_each_page)
     self._clear_cache_before_each_run = clear_cache_before_each_run
     self._close_tabs_before_run = True
-
-  @property
-  def is_multi_tab_test(self):
-    """Returns True if the test opens multiple tabs.
-
-    If the test overrides TabForPage, it is deemed a multi-tab test.
-    Multi-tab tests do not retry after tab or browser crashes, whereas,
-    single-tab tests too. That is because the state of multi-tab tests
-    (e.g., how many tabs are open, etc.) is unknown after crashes.
-    """
-    return self.TabForPage.__func__ is not LegacyPageTest.TabForPage.__func__
 
   @property
   def clear_cache_before_each_run(self):
@@ -94,27 +72,6 @@ class LegacyPageTest(object):
   @close_tabs_before_run.setter
   def close_tabs_before_run(self, close_tabs):
     self._close_tabs_before_run = close_tabs
-
-  def RestartBrowserBeforeEachPage(self):
-    """ Should the browser be restarted for the page?
-
-    This returns true if the test needs to unconditionally restart the
-    browser for each page. It may be called before the browser is started.
-    """
-    return self._needs_browser_restart_after_each_page
-
-  def StopBrowserAfterPage(self, browser, page):
-    """Should the browser be stopped after the page is run?
-
-    This is called after a page is run to decide whether the browser needs to
-    be stopped to clean up its state. If it is stopped, then it will be
-    restarted to run the next page.
-
-    A test that overrides this can look at both the page and the browser to
-    decide whether it needs to stop the browser.
-    """
-    del browser, page  # unused
-    return False
 
   def CustomizeBrowserOptions(self, options):
     """Override to add test-specific options to the BrowserOptions object"""
@@ -162,7 +119,7 @@ class LegacyPageTest(object):
     """Override to check test assertions and perform measurement.
 
     When adding measurement results, call results.AddValue(...) for
-    each result. Raise an exception or add a failure.FailureValue on
+    each result. Raise an exception or call results.Fail upon
     failure. legacy_page_test.py also provides several base exception classes
     to use.
 

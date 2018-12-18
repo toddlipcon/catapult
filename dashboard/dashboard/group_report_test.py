@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import json
 import unittest
 
 import webapp2
@@ -10,12 +11,13 @@ import webtest
 from google.appengine.ext import ndb
 
 from dashboard import group_report
-from dashboard import testing_common
-from dashboard import utils
+from dashboard import short_uri
+from dashboard.common import testing_common
+from dashboard.common import utils
 from dashboard.models import anomaly
 from dashboard.models import bug_data
+from dashboard.models import page_state
 from dashboard.models import sheriff
-from dashboard.models import stoppage_alert
 
 
 class GroupReportTest(testing_common.TestCase):
@@ -89,9 +91,37 @@ class GroupReportTest(testing_common.TestCase):
         '/group_report?keys=%s' % ','.join(selected_keys))
     alert_list = self.GetJsonValue(response, 'alert_list')
 
+    # Confirm the first N keys are the selected keys.
+    first_keys = [alert_list[i]['key'] for i in xrange(len(selected_keys))]
+    self.assertSetEqual(set(selected_keys), set(first_keys))
+
     # Expect selected alerts + overlapping alerts,
     # but not the non-overlapping alert.
     self.assertEqual(5, len(alert_list))
+
+  def testPost_WithInvalidSidParameter_ShowsError(self):
+    response = self.testapp.post('/group_report?sid=foobar')
+    error = self.GetJsonValue(response, 'error')
+    self.assertIn('No anomalies specified', error)
+
+  def testPost_WithValidSidParameter(self):
+    sheriff_key = self._AddSheriff()
+    test_keys = self._AddTests()
+    selected_ranges = [(400, 900), (200, 700)]
+    selected_keys = self._AddAnomalyEntities(
+        selected_ranges, test_keys[0], sheriff_key)
+
+    json_keys = json.dumps(selected_keys)
+    state_id = short_uri.GenerateHash(','.join(selected_keys))
+    page_state.PageState(id=state_id, value=json_keys).put()
+
+    response = self.testapp.post('/group_report?sid=%s' % state_id)
+    alert_list = self.GetJsonValue(response, 'alert_list')
+
+    # Confirm the first N keys are the selected keys.
+    first_keys = [alert_list[i]['key'] for i in xrange(len(selected_keys))]
+    self.assertSetEqual(set(selected_keys), set(first_keys))
+    self.assertEqual(2, len(alert_list))
 
   def testPost_WithKeyOfNonExistentAlert_ShowsError(self):
     key = ndb.Key('Anomaly', 123)
@@ -133,17 +163,6 @@ class GroupReportTest(testing_common.TestCase):
     response = self.testapp.post('/group_report?bug_id=123')
     alert_list = self.GetJsonValue(response, 'alert_list')
     self.assertEqual(3, len(alert_list))
-
-  def testPost_WithBugIdParameter_ListsStoppageAlerts(self):
-    test_keys = self._AddTests()
-    bug_data.Bug(id=123).put()
-    row = testing_common.AddRows(utils.TestPath(test_keys[0]), {100})[0]
-    alert = stoppage_alert.CreateStoppageAlert(test_keys[0].get(), row)
-    alert.bug_id = 123
-    alert.put()
-    response = self.testapp.post('/group_report?bug_id=123')
-    alert_list = self.GetJsonValue(response, 'alert_list')
-    self.assertEqual(1, len(alert_list))
 
   def testPost_WithInvalidBugIdParameter_ShowsError(self):
     response = self.testapp.post('/group_report?bug_id=foo')

@@ -14,9 +14,10 @@ from google.appengine.api import datastore_errors
 from google.appengine.api import taskqueue
 from google.appengine.ext import ndb
 
-from dashboard import datastore_hooks
-from dashboard import math_utils
 from dashboard import post_data_handler
+from dashboard.common import datastore_hooks
+from dashboard.common import histogram_helpers
+from dashboard.common import math_utils
 from dashboard.models import graph_data
 
 _TASK_QUEUE_NAME = 'new-points-queue'
@@ -121,17 +122,18 @@ class AddPointHandler(post_data_handler.PostDataHandler):
     """
     datastore_hooks.SetPrivilegedRequest()
     if not self._CheckIpAgainstWhitelist():
-      # TODO(qyearsley): Add test coverage. See catapult:#1346.
       return
 
-    data = self.request.get('data')
-    if not data:
-      # TODO(qyearsley): Add test coverage. See catapult:#1346.
+    data_str = self.request.get('data')
+    if not data_str:
       self.ReportError('Missing "data" parameter.', status=400)
       return
 
+    self.AddData(data_str)
+
+  def AddData(self, data_str):
     try:
-      data = json.loads(self.request.get('data'))
+      data = json.loads(data_str)
     except ValueError:
       self.ReportError('Invalid JSON string.', status=400)
       return
@@ -139,7 +141,7 @@ class AddPointHandler(post_data_handler.PostDataHandler):
     logging.info('Received data: %s', data)
 
     try:
-      if type(data) is dict:
+      if isinstance(data, dict):
         if data.get('chart_data'):
           data = _DashboardJsonToRawRows(data)
           if not data:
@@ -149,13 +151,47 @@ class AddPointHandler(post_data_handler.PostDataHandler):
               'Data should be a list of rows or a Dashboard JSON v1.0 dict.',
               status=400)
           return
-      test_map = _ConstructTestPathMap(data)
+
+      if data:
+        # We only need to validate the row ID for one point, since all points
+        # being handled by this upload should have the same row ID.
+        last_added_entity = _GetLastAddedEntityForRow(data[0])
+        _ValidateRowId(data[0], last_added_entity)
+
       for row_dict in data:
-        _ValidateRowDict(row_dict, test_map)
+        ValidateRowDict(row_dict)
       _AddTasks(data)
     except BadRequestError as error:
       # If any of the data was invalid, abort immediately and return an error.
       self.ReportError(error.message, status=400)
+
+
+def _ValidateNameString(value, name):
+  if not value:
+    raise BadRequestError('No %s name given.' % name)
+  if not isinstance(value, basestring):
+    raise BadRequestError('Error: %s must be a string' % name)
+  if '/' in value:
+    raise BadRequestError('Illegal slash in %s' % name)
+
+
+def _ValidateDashboardJson(dash_json_dict):
+  assert isinstance(dash_json_dict, dict)
+  # A Dashboard JSON dict should at least have all charts coming from the
+  # same master, bot and rev. It can contain multiple charts, however.
+  _ValidateNameString(dash_json_dict.get('master'), 'master')
+  _ValidateNameString(dash_json_dict.get('bot'), 'bot')
+
+  if not dash_json_dict.get('point_id'):
+    raise BadRequestError('No point_id number given.')
+  if not dash_json_dict.get('chart_data'):
+    raise BadRequestError('No chart data given.')
+
+  charts = dash_json_dict.get('chart_data', {}).get('charts', {})
+
+  for _, v in charts.iteritems():
+    if not isinstance(v, dict):
+      raise BadRequestError('Expected be dict: %s' % str(v))
 
 
 def _DashboardJsonToRawRows(dash_json_dict):
@@ -175,17 +211,8 @@ def _DashboardJsonToRawRows(dash_json_dict):
     AssertionError: The given argument wasn't a dict.
     BadRequestError: The content of the input wasn't valid.
   """
-  assert type(dash_json_dict) is dict
-  # A Dashboard JSON dict should at least have all charts coming from the
-  # same master, bot and rev. It can contain multiple charts, however.
-  if not dash_json_dict.get('master'):
-    raise BadRequestError('No master name given.')
-  if not dash_json_dict.get('bot'):
-    raise BadRequestError('No bot name given.')
-  if not dash_json_dict.get('point_id'):
-    raise BadRequestError('No point_id number given.')
-  if not dash_json_dict.get('chart_data'):
-    raise BadRequestError('No chart data given.')
+  _ValidateDashboardJson(dash_json_dict)
+
   test_suite_name = _TestSuiteName(dash_json_dict)
 
   chart_data = dash_json_dict.get('chart_data', {})
@@ -203,7 +230,6 @@ def _DashboardJsonToRawRows(dash_json_dict):
   row_template = _MakeRowTemplate(dash_json_dict)
 
   benchmark_description = chart_data.get('benchmark_description', '')
-  trace_rerun_options = dict(chart_data.get('trace_rerun_options', []))
   is_ref = bool(dash_json_dict.get('is_ref'))
   rows = []
 
@@ -222,9 +248,6 @@ def _DashboardJsonToRawRows(dash_json_dict):
         if specific_vals['tracing_uri']:
           row['supplemental_columns']['a_tracing_uri'] = specific_vals[
               'tracing_uri']
-        if trace_rerun_options:
-          row['supplemental_columns']['a_trace_rerun_options'] = (
-              trace_rerun_options)
         row.update(specific_vals)
         rows.append(row)
 
@@ -238,12 +261,18 @@ def _TestSuiteName(dash_json_dict):
   present or it is None, the dashboard will fall back to using "benchmark_name"
   in the "chart_data" dict.
   """
+  name = None
   if dash_json_dict.get('test_suite_name'):
-    return dash_json_dict['test_suite_name']
-  try:
-    return dash_json_dict['chart_data']['benchmark_name']
-  except KeyError as e:
-    raise BadRequestError('Could not find test suite name. ' + e.message)
+    name = dash_json_dict['test_suite_name']
+  else:
+    try:
+      name = dash_json_dict['chart_data']['benchmark_name']
+    except KeyError as e:
+      raise BadRequestError('Could not find test suite name. ' + e.message)
+
+  _ValidateNameString(name, 'test_suite_name')
+
+  return name
 
 
 def _AddTasks(data):
@@ -257,11 +286,12 @@ def _AddTasks(data):
     task_list.append(taskqueue.Task(
         url='/add_point_queue',
         params={'data': json.dumps(data_sublist)}))
+
   queue = taskqueue.Queue(_TASK_QUEUE_NAME)
-  for task_sublist in _Chunk(task_list, taskqueue.MAX_TASKS_PER_ADD):
-    # Calling get_result waits for all tasks to be added. It's possible that
-    # this is different, and maybe faster, than just calling queue.add.
-    queue.add_async(task_sublist).get_result()
+  futures = [queue.add_async(t)
+             for t in _Chunk(task_list, taskqueue.MAX_TASKS_PER_ADD)]
+  for f in futures:
+    f.get_result()
 
 
 def _Chunk(items, chunk_size):
@@ -358,7 +388,8 @@ def _FlattenTrace(test_suite_name, chart_name, trace_name, trace,
       'cloud_url' in tracing_links[trace_name]):
     tracing_uri = tracing_links[trace_name]['cloud_url'].replace('\\/', '/')
 
-  trace_name = _EscapeName(trace_name)
+  story_name = trace_name
+  trace_name = histogram_helpers.EscapeName(trace_name)
   if trace_name == 'summary':
     subtest_name = chart_name
   else:
@@ -385,6 +416,9 @@ def _FlattenTrace(test_suite_name, chart_name, trace_name, trace,
       raise BadRequestError('improvement_direction must not be None')
     row_dict['higher_is_better'] = _ImprovementDirectionToHigherIsBetter(
         improvement_direction_str)
+
+  if story_name != trace_name:
+    row_dict['unescaped_story_name'] = story_name
 
   return row_dict
 
@@ -445,18 +479,6 @@ def _IsNumber(v):
   return isinstance(v, float) or isinstance(v, int) or isinstance(v, long)
 
 
-def _EscapeName(name):
-  """Escapes a trace name so it can be stored in a row.
-
-  Args:
-    name: A string representing a name.
-
-  Returns:
-    An escaped version of the name.
-  """
-  return re.sub(r'[\:|=/#&,]', '_', name)
-
-
 def _GeomMeanAndStdDevFromHistogram(histogram):
   """Generates the geom. mean and std. dev. for a histogram.
 
@@ -477,7 +499,6 @@ def _GeomMeanAndStdDevFromHistogram(histogram):
   # build/scripts/common/chromium_utils.py and was used initially for
   # processing histogram results on the buildbot side previously.
   if 'buckets' not in histogram:
-    # TODO(qyearsley): Add test coverage. See catapult:#1346.
     return 0.0, 0.0
   count = 0
   sum_of_logs = 0
@@ -485,7 +506,6 @@ def _GeomMeanAndStdDevFromHistogram(histogram):
     if 'high' in bucket:
       bucket['mean'] = (bucket['low'] + bucket['high']) / 2.0
     else:
-      # TODO(qyearsley): Add test coverage. See catapult:#1346.
       bucket['mean'] = bucket['low']
     if bucket['mean'] > 0:
       sum_of_logs += math.log(bucket['mean']) * bucket['count']
@@ -526,35 +546,27 @@ def _ImprovementDirectionToHigherIsBetter(improvement_direction_str):
                           improvement_direction_str)
 
 
-def _ConstructTestPathMap(row_dicts):
-  """Makes a mapping from test paths to last added revision."""
-  last_added_revision_keys = []
-  for row in row_dicts:
-    if not ('master' in row and 'bot' in row and 'test' in row):
-      continue
-    path = '%s/%s/%s' % (row['master'], row['bot'], row['test'].strip('/'))
-    if len(path) > _MAX_TEST_PATH_LENGTH:
-      continue
-    last_added_revision_keys.append(ndb.Key('LastAddedRevision', path))
+def _GetLastAddedEntityForRow(row):
+  if not ('master' in row and 'bot' in row and 'test' in row):
+    return None
+  path = '%s/%s/%s' % (row['master'], row['bot'], row['test'].strip('/'))
+  if len(path) > _MAX_TEST_PATH_LENGTH:
+    return None
 
   try:
-    last_added_revision_entities = ndb.get_multi(last_added_revision_keys)
+    last_added_revision_entity = ndb.Key('LastAddedRevision', path).get()
   except datastore_errors.BadRequestError:
-    # TODO(qyearsley): Add test coverage. See catapult:#1346.
-    logging.warn('Datastore BadRequestError when getting %s',
-                 repr(last_added_revision_keys))
-    return {}
+    logging.warn('Datastore BadRequestError when getting %s', path)
+    return None
 
-  return {r.key.string_id(): r.revision
-          for r in last_added_revision_entities if r is not None}
+  return last_added_revision_entity
 
 
-def _ValidateRowDict(row, test_map):
+def ValidateRowDict(row):
   """Checks all fields in the input dictionary.
 
   Args:
     row: A dictionary which represents one point.
-    test_map: A dictionary mapping test paths to last added revision.
 
   Raises:
     BadRequestError: The input was not valid.
@@ -564,7 +576,6 @@ def _ValidateRowDict(row, test_map):
     if field not in row:
       raise BadRequestError('No "%s" field in row dict.' % field)
   _ValidateMasterBotTest(row['master'], row['bot'], row['test'])
-  _ValidateRowId(row, test_map)
   GetAndValidateRowProperties(row)
 
 
@@ -579,10 +590,8 @@ def _ValidateMasterBotTest(master, bot, test):
   if len(test.split('/')) > graph_data.MAX_TEST_ANCESTORS:
     raise BadRequestError('Invalid test name: %s' % test)
 
-  # The master and bot names have just one part.
-  if '/' in master or '/' in bot:
-    raise BadRequestError('Illegal slash in master or bot name.')
-
+  _ValidateNameString(master, 'master')
+  _ValidateNameString(bot, 'bot')
   _ValidateTestPath('%s/%s/%s' % (master, bot, test))
 
 
@@ -609,13 +618,12 @@ def _ValidateTestPathPartName(name):
         'Invalid name: "%s". Names cannot start and end with "__".' % name)
 
 
-def _ValidateRowId(row_dict, test_map):
+def _ValidateRowId(row_dict, last_added_entity):
   """Checks whether the ID for a Row is OK.
 
   Args:
     row_dict: A dictionary with new point properties, including "revision".
-    test_map: A dictionary mapping test paths to the last previously added
-        revision for each test.
+    last_added_entity: The last previous added revision entity for the test.
 
   Raises:
     BadRequestError: The revision is not acceptable for some reason.
@@ -625,11 +633,12 @@ def _ValidateRowId(row_dict, test_map):
   # Get the last added revision number for this test.
   master, bot, test = row_dict['master'], row_dict['bot'], row_dict['test']
   test_path = '%s/%s/%s' % (master, bot, test)
-  last_row_id = test_map.get(test_path)
-  if not last_row_id:
+  if not last_added_entity:
     # Could be first point in test.
     logging.warning('Test %s has no last added revision entry.', test_path)
     return
+
+  last_row_id = last_added_entity.revision
 
   allow_jump = (
       master.endswith('Internal') or
@@ -665,10 +674,8 @@ def _IsAcceptableRowId(row_id, last_row_id, allow_jump=False):
     True if acceptable, False otherwise.
   """
   if last_row_id is None:
-    # TODO(qyearsley): Add test coverage. See catapult:#1346.
     return True
   if row_id <= 0:
-    # TODO(qyearsley): Add test coverage. See catapult:#1346.
     return False
   # Too big of a decrease.
   if row_id < 0.5 * last_row_id:

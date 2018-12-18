@@ -25,6 +25,21 @@ def _CheckRegisteredMetrics(input_api, output_api):
   return results
 
 
+def _CheckRegisteredDiagnostics(input_api, output_api):
+  """Check that all Diagnostic subclasses are registered."""
+  results = []
+  tracing_dir = input_api.PresubmitLocalPath()
+  out, return_code = _RunArgs(
+      [input_api.python_executable,
+       input_api.os_path.join(tracing_dir, 'bin', 'validate_all_diagnostics')],
+      input_api)
+  if return_code:
+    results.append(output_api.PresubmitError(
+        'Failed validate_all_diagnostics: ', long_text=out))
+  return results
+
+
+
 def CheckChangeOnUpload(input_api, output_api):
   return _CheckChange(input_api, output_api)
 
@@ -39,8 +54,8 @@ def _CheckChange(input_api, output_api):
   original_sys_path = sys.path
   try:
     sys.path += [input_api.PresubmitLocalPath()]
-    from tracing_build import check_gypi
-    error = check_gypi.GypiCheck()
+    from tracing_build import check_gni
+    error = check_gni.GniCheck()
     if error:
       results.append(output_api.PresubmitError(error))
   finally:
@@ -51,14 +66,16 @@ def _CheckChange(input_api, output_api):
       pylintrc='../pylintrc'))
 
   results += _CheckRegisteredMetrics(input_api, output_api)
+  results += _CheckRegisteredDiagnostics(input_api, output_api)
 
   return results
 
 
 def _GetPathsToPrepend(input_api):
+  import tracing_project
   project_dir = input_api.PresubmitLocalPath()
   catapult_dir = input_api.os_path.join(project_dir, '..')
   return [
       project_dir,
       input_api.os_path.join(catapult_dir, 'third_party', 'mock'),
-  ]
+  ] + tracing_project.GetDependencyPaths()

@@ -5,13 +5,10 @@
 from telemetry.internal.backends.chrome_inspector import devtools_client_backend
 from telemetry.internal.browser import web_contents
 
-try:
-  from devil.android import ports
-except ImportError:
-  ports = None
 
 class WebViewNotFoundException(Exception):
   pass
+
 
 class AndroidProcess(object):
   """Represents a single android process."""
@@ -20,8 +17,12 @@ class AndroidProcess(object):
     self._app_backend = app_backend
     self._pid = pid
     self._name = name
-    self._local_port = ports.AllocateTestServerPort()
+    # TODO(crbug.com/799415): Move forwarder into DevToolsClientBackend
     self._devtools_client = None
+
+  def __del__(self):
+    if self._devtools_client:
+      self._devtools_client.Close()
 
   @property
   def pid(self):
@@ -37,12 +38,9 @@ class AndroidProcess(object):
 
   def _UpdateDevToolsClient(self):
     if self._devtools_client is None:
-      self._app_backend.platform_backend.ForwardHostToDevice(
-          self._local_port, self._remote_devtools_port)
-      if devtools_client_backend.IsDevToolsAgentAvailable(
-          self._local_port, self._app_backend):
-        self._devtools_client = devtools_client_backend.DevToolsClientBackend(
-            self._local_port, self._remote_devtools_port, self._app_backend)
+      self._devtools_client = devtools_client_backend.GetDevToolsBackEndIfReady(
+          devtools_port=self._remote_devtools_port,
+          app_backend=self._app_backend)
 
   def GetWebViews(self):
     webviews = []

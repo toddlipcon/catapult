@@ -67,16 +67,15 @@ class Tab(web_contents.WebContents):
                                              'event_listener_count']]))
     return dom_counters
 
+  def PrepareForLeakDetection(self):
+    self._inspector_backend.PrepareForLeakDetection(
+        timeout=DEFAULT_TAB_TIMEOUT)
+
   def Activate(self):
     """Brings this tab to the foreground asynchronously.
 
     Not all browsers or browser versions support this method.
     Be sure to check browser.supports_tab_control.
-
-    Please note: this is asynchronous. There is a delay between this call
-    and the page's documentVisibilityState becoming 'visible', and yet more
-    delay until the actual tab is visible to the user. None of these delays
-    are included in this call.
 
     Raises:
       devtools_http.DevToolsClientConnectionError
@@ -85,11 +84,16 @@ class Tab(web_contents.WebContents):
     """
     self._tab_list_backend.ActivateTab(self.id)
 
-  def Close(self):
+  def Close(self, keep_one=True, timeout=300):
     """Closes this tab.
 
     Not all browsers or browser versions support this method.
     Be sure to check browser.supports_tab_control.
+
+    Args:
+      keep_one: Whether to make sure to keep one tab open. On some platforms
+        closing the last tab causes the browser to be closed, to prevent this
+        the default is to open a new tab before closing the last one.
 
     Raises:
       devtools_http.DevToolsClientConnectionError
@@ -97,7 +101,9 @@ class Tab(web_contents.WebContents):
       tab_list_backend.TabUnexpectedResponseException
       exceptions.TimeoutException
     """
-    self._tab_list_backend.CloseTab(self.id)
+    if keep_one and len(self._tab_list_backend) <= 1:
+      self._tab_list_backend.New(timeout)
+    self._tab_list_backend.CloseTab(self.id, timeout)
 
   @property
   def screenshot_supported(self):
@@ -133,26 +139,30 @@ class Tab(web_contents.WebContents):
       exceptions.TimeoutException
       exceptions.DevtoolsTargetCrashException
     """
-    self.ExecuteJavaScript("""
-      (function() {
-        var screen = document.createElement('div');
-        screen.style.background = 'rgba(%d, %d, %d, %d)';
-        screen.style.position = 'fixed';
-        screen.style.top = '0';
-        screen.style.left = '0';
-        screen.style.width = '100%%';
-        screen.style.height = '100%%';
-        screen.style.zIndex = '2147483638';
-        document.body.appendChild(screen);
-        requestAnimationFrame(function() {
+    screen_save = 'window.__telemetry_screen_%d' % int(color)
+    self.ExecuteJavaScript(
+        """
+        (function() {
+          var screen = document.createElement('div');
+          screen.style.background = {{ color }};
+          screen.style.position = 'fixed';
+          screen.style.top = '0';
+          screen.style.left = '0';
+          screen.style.width = '100%';
+          screen.style.height = '100%';
+          screen.style.zIndex = '2147483638';
+          document.body.appendChild(screen);
           requestAnimationFrame(function() {
-            window.__telemetry_screen_%d = screen;
+            requestAnimationFrame(function() {
+              {{ @screen_save }} = screen;
+            });
           });
-        });
-      })();
-    """ % (color.r, color.g, color.b, color.a, int(color)))
-    self.WaitForJavaScriptExpression(
-        '!!window.__telemetry_screen_%d' % int(color), 5)
+        })();
+        """,
+        color='rgba(%d, %d, %d, %d)' % (color.r, color.g, color.b, color.a),
+        screen_save=screen_save)
+    self.WaitForJavaScriptCondition(
+        '!!{{ @screen_save }}', screen_save=screen_save, timeout=5)
 
   def ClearHighlight(self, color):
     """Clears a highlight of the given bitmap.RgbaColor.
@@ -163,20 +173,21 @@ class Tab(web_contents.WebContents):
       exceptions.TimeoutException
       exceptions.DevtoolsTargetCrashException
     """
+    screen_save = 'window.__telemetry_screen_%d' % int(color)
     self.ExecuteJavaScript("""
-      (function() {
-        document.body.removeChild(window.__telemetry_screen_%d);
-        requestAnimationFrame(function() {
+        (function() {
+          document.body.removeChild({{ @screen_save }});
           requestAnimationFrame(function() {
-            window.__telemetry_screen_%d = null;
-            console.time('__ClearHighlight.video_capture_start');
-            console.timeEnd('__ClearHighlight.video_capture_start');
+            requestAnimationFrame(function() {
+              {{ @screen_save }} = null;
+              console.time('__ClearHighlight.video_capture_start');
+              console.timeEnd('__ClearHighlight.video_capture_start');
+            });
           });
-        });
-      })();
-    """ % (int(color), int(color)))
-    self.WaitForJavaScriptExpression(
-        '!window.__telemetry_screen_%d' % int(color), 5)
+        })();
+        """, screen_save=screen_save)
+    self.WaitForJavaScriptCondition(
+        '!{{ @screen_save }}', screen_save=screen_save, timeout=5)
 
   def StartVideoCapture(self, min_bitrate_mbps,
                         highlight_bitmap=video.HIGHLIGHT_ORANGE_FRAME):
@@ -263,3 +274,24 @@ class Tab(web_contents.WebContents):
     """)
     if force:
       self.Navigate('about:blank')
+
+  def ClearDataForOrigin(self, url, timeout=DEFAULT_TAB_TIMEOUT):
+    """Clears storage data for the origin of url.
+
+    With assigning 'all' to params.storageTypes, Storage.clearDataForOrigin
+    clears all storage of app cache, cookies, file systems, indexed db,
+    local storage, shader cache, web sql, service workers and cache storage.
+    See StorageHandler::ClearDataForOrigin() for more details.
+
+    Raises:
+      exceptions.StoryActionError
+    """
+    return self._inspector_backend.ClearDataForOrigin(url, timeout)
+
+  def StopAllServiceWorkers(self, timeout=DEFAULT_TAB_TIMEOUT):
+    """Stops all service workers.
+
+    Raises:
+      exceptions.StoryActionError
+    """
+    return self._inspector_backend.StopAllServiceWorkers(timeout)

@@ -12,9 +12,9 @@ from google.appengine.api import users
 from dashboard import edit_config_handler
 from dashboard import edit_sheriffs
 from dashboard import put_entities_task
-from dashboard import testing_common
-from dashboard import utils
-from dashboard import xsrf
+from dashboard.common import testing_common
+from dashboard.common import utils
+from dashboard.common import xsrf
 from dashboard.models import graph_data
 from dashboard.models import sheriff
 
@@ -35,25 +35,42 @@ class EditSheriffsTest(testing_common.TestCase):
     """Adds some sample data used in the tests below."""
     master = graph_data.Master(id='TheMaster').put()
     graph_data.Bot(id='TheBot', parent=master).put()
-    graph_data.TestMetadata(id='TheMaster/TheBot/Suite1').put()
-    graph_data.TestMetadata(id='TheMaster/TheBot/Suite2').put()
-    graph_data.TestMetadata(
-        id='TheMaster/TheBot/Suite1/aaa', has_rows=True).put()
-    graph_data.TestMetadata(
-        id='TheMaster/TheBot/Suite1/bbb', has_rows=True).put()
-    graph_data.TestMetadata(
-        id='TheMaster/TheBot/Suite2/ccc', has_rows=True).put()
-    graph_data.TestMetadata(
-        id='TheMaster/TheBot/Suite2/ddd', has_rows=True).put()
+    t = graph_data.TestMetadata(id='TheMaster/TheBot/Suite1')
+    t.UpdateSheriff()
+    t.put()
+
+    t = graph_data.TestMetadata(id='TheMaster/TheBot/Suite2')
+    t.UpdateSheriff()
+    t.put()
+
+    t = graph_data.TestMetadata(
+        id='TheMaster/TheBot/Suite1/aaa', has_rows=True)
+    t.UpdateSheriff()
+    t.put()
+
+    t = graph_data.TestMetadata(
+        id='TheMaster/TheBot/Suite1/bbb', has_rows=True)
+    t.UpdateSheriff()
+    t.put()
+
+    t = graph_data.TestMetadata(
+        id='TheMaster/TheBot/Suite2/ccc', has_rows=True)
+    t.UpdateSheriff()
+    t.put()
+
+    t = graph_data.TestMetadata(
+        id='TheMaster/TheBot/Suite2/ddd', has_rows=True)
+    t.UpdateSheriff()
+    t.put()
 
   def _AddSheriff(self, name, email=None, url=None,
                   internal_only=False, summarize=False, patterns=None,
-                  stoppage_alert_delay=0, labels=None):
+                  labels=None):
     """Adds a Sheriff entity to the datastore."""
     sheriff.Sheriff(
         id=name, email=email, url=url, internal_only=internal_only,
         summarize=summarize, patterns=patterns or [],
-        stoppage_alert_delay=stoppage_alert_delay, labels=labels or []).put()
+        labels=labels or []).put()
 
   def testPost_AddNewSheriff(self):
     self.testapp.post('/edit_sheriffs', {
@@ -65,6 +82,9 @@ class EditSheriffsTest(testing_common.TestCase):
         'summarize': 'true',
         'xsrf_token': xsrf.GenerateToken(users.get_current_user()),
     })
+
+    self.ExecuteDeferredTasks(edit_config_handler._TASK_QUEUE_NAME)
+
     sheriffs = sheriff.Sheriff.query().fetch()
     self.assertEqual(1, len(sheriffs))
     self.assertEqual('New Sheriff', sheriffs[0].key.string_id())
@@ -88,6 +108,7 @@ class EditSheriffsTest(testing_common.TestCase):
         'labels': '',
         'xsrf_token': xsrf.GenerateToken(users.get_current_user()),
     })
+
     sheriff_entity = sheriff.Sheriff.query().fetch()[0]
     self.assertEqual('bar@chromium.org', sheriff_entity.email)
     self.assertEqual('http://perf.com/mysheriff', sheriff_entity.url)
@@ -97,6 +118,7 @@ class EditSheriffsTest(testing_common.TestCase):
 
     # After the tasks get executed, the TestMetadata entities should also be
     # updated.
+    self.ExecuteDeferredTasks('default')
     self.ExecuteTaskQueueTasks(
         '/put_entities_task', edit_config_handler._TASK_QUEUE_NAME)
     aaa = utils.TestKey('TheMaster/TheBot/Suite1/aaa').get()
@@ -122,6 +144,7 @@ class EditSheriffsTest(testing_common.TestCase):
 
     # After the tasks get executed, the TestMetadata entities should also be
     # updated.
+    self.ExecuteDeferredTasks('default')
     self.ExecuteTaskQueueTasks(
         '/put_entities_task', edit_config_handler._TASK_QUEUE_NAME)
     aaa = utils.TestKey('TheMaster/TheBot/Suite1/aaa').get()
@@ -189,7 +212,7 @@ class EditSheriffsTest(testing_common.TestCase):
 
   def testGet_SheriffDataIsEmbeddedOnPage(self):
     self._AddSheriff('Foo Sheriff', email='foo@x.org', patterns=['*/*/*/*'])
-    self._AddSheriff('Bar Sheriff', summarize=True, stoppage_alert_delay=5,
+    self._AddSheriff('Bar Sheriff', summarize=True,
                      patterns=['x/y/z', 'a/b/c'], labels=['hello', 'world'])
     response = self.testapp.get('/edit_sheriffs')
     expected = {
@@ -199,7 +222,6 @@ class EditSheriffsTest(testing_common.TestCase):
             'internal_only': False,
             'labels': '',
             'summarize': False,
-            'stoppage_alert_delay': 0,
             'patterns': '*/*/*/*',
         },
         'Bar Sheriff': {
@@ -208,12 +230,47 @@ class EditSheriffsTest(testing_common.TestCase):
             'internal_only': False,
             'labels': 'hello,world',
             'summarize': True,
-            'stoppage_alert_delay': 5,
             'patterns': 'a/b/c\nx/y/z',
         },
     }
     actual = self.GetEmbeddedVariable(response, 'SHERIFF_DATA')
     self.assertEqual(expected, actual)
+
+  def testPost_SendsNotificationEmail(self):
+    self._AddSampleTestData()
+    self._AddSheriff('Chromium Perf Sheriff', patterns=['*/*/*/*'])
+    self.testapp.post('/edit_sheriffs', {
+        'add-edit': 'edit',
+        'edit-name': 'Chromium Perf Sheriff',
+        'patterns': '*/*/*/ddd\n\n*/*/*/ccc',
+        'xsrf_token': xsrf.GenerateToken(users.get_current_user()),
+    })
+    sheriff_entity = sheriff.Sheriff.query().fetch()[0]
+    self.assertEqual(['*/*/*/ccc', '*/*/*/ddd'], sheriff_entity.patterns)
+
+    messages = self.mail_stub.get_sent_messages()
+    self.assertEqual(1, len(messages))
+    self.assertEqual('gasper-alerts@google.com', messages[0].sender)
+    self.assertEqual('chrome-performance-monitoring-alerts@google.com',
+                     messages[0].to)
+    self.assertEqual(
+        'Added or updated Sheriff: Chromium Perf Sheriff by foo@bar.com',
+        messages[0].subject)
+    expected_email = """The configuration of None was changed by foo@bar.com.
+
+Key: Chromium Perf Sheriff
+
+New test path patterns:
+[
+  "*/*/*/ccc",
+  "*/*/*/ddd"
+]
+
+Old test path patterns
+[
+  "*/*/*/*"
+]"""
+    self.assertIn(expected_email, str(messages[0].body))
 
 
 if __name__ == '__main__':

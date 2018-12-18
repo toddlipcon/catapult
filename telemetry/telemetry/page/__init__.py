@@ -18,20 +18,20 @@ from telemetry.internal.actions import action_runner as action_runner_module
 class Page(story.Story):
 
   def __init__(self, url, page_set=None, base_dir=None, name='',
-               credentials_path=None,
-               credentials_bucket=cloud_storage.PUBLIC_BUCKET, labels=None,
-               startup_url='', make_javascript_deterministic=True,
+               tags=None, startup_url='', make_javascript_deterministic=True,
                shared_page_state_class=shared_page_state.SharedPageState,
                grouping_keys=None,
                cache_temperature=cache_temperature_module.ANY,
-               traffic_setting=traffic_setting_module.NONE):
+               traffic_setting=traffic_setting_module.NONE,
+               platform_specific=False,
+               extra_browser_args=None):
     self._url = url
 
     super(Page, self).__init__(
-        shared_page_state_class, name=name, labels=labels,
+        shared_page_state_class, name=name, tags=tags,
         is_local=self._scheme in ['file', 'chrome', 'about'],
         make_javascript_deterministic=make_javascript_deterministic,
-        grouping_keys=grouping_keys)
+        grouping_keys=grouping_keys, platform_specific=platform_specific)
 
     self._page_set = page_set
     # Default value of base_dir is the directory of the file that defines the
@@ -40,36 +40,19 @@ class Page(story.Story):
       base_dir = os.path.dirname(inspect.getfile(self.__class__))
     self._base_dir = base_dir
     self._name = name
-    if credentials_path:
-      credentials_path = os.path.join(self._base_dir, credentials_path)
-      cloud_storage.GetIfChanged(credentials_path, credentials_bucket)
-      if not os.path.exists(credentials_path):
-        logging.error('Invalid credentials path: %s' % credentials_path)
-        credentials_path = None
-    self._credentials_path = credentials_path
     self._cache_temperature = cache_temperature
-    if cache_temperature != cache_temperature_module.ANY:
-      self.grouping_keys['cache_temperature'] = cache_temperature
 
     assert traffic_setting in traffic_setting_module.NETWORK_CONFIGS, (
         'Invalid traffic setting: %s' % traffic_setting)
     self._traffic_setting = traffic_setting
 
-    # Whether to collect garbage on the page before navigating & performing
-    # page actions.
-    self._collect_garbage_before_run = True
-
     # These attributes can be set dynamically by the page.
     self.synthetic_delays = dict()
     self._startup_url = startup_url
-    self.credentials = None
     self.skip_waits = False
     self.script_to_evaluate_on_commit = None
     self._SchemeErrorCheck()
-
-  @property
-  def credentials_path(self):
-    return self._credentials_path
+    self._extra_browser_args = extra_browser_args or []
 
   @property
   def cache_temperature(self):
@@ -82,6 +65,10 @@ class Page(story.Story):
   @property
   def startup_url(self):
     return self._startup_url
+
+  @property
+  def extra_browser_args(self):
+    return self._extra_browser_args
 
   def _SchemeErrorCheck(self):
     if not self._scheme:
@@ -98,15 +85,18 @@ class Page(story.Story):
     current_tab = shared_state.current_tab
     # Collect garbage from previous run several times to make the results more
     # stable if needed.
-    if self._collect_garbage_before_run:
-      for _ in xrange(0, 5):
-        current_tab.CollectGarbage()
-    shared_state.page_test.WillNavigateToPage(self, current_tab)
-    shared_state.page_test.RunNavigateSteps(self, current_tab)
-    shared_state.page_test.DidNavigateToPage(self, current_tab)
+    for _ in xrange(0, 5):
+      current_tab.CollectGarbage()
     action_runner = action_runner_module.ActionRunner(
         current_tab, skip_waits=self.skip_waits)
-    self.RunPageInteractions(action_runner)
+    shared_state.page_test.WillNavigateToPage(self, current_tab)
+    with shared_state.interval_profiling_controller.SamplePeriod(
+        'navigation', action_runner):
+      shared_state.page_test.RunNavigateSteps(self, current_tab)
+    shared_state.page_test.DidNavigateToPage(self, current_tab)
+    with shared_state.interval_profiling_controller.SamplePeriod(
+        'interactions', action_runner):
+      self.RunPageInteractions(action_runner)
 
   def RunNavigateSteps(self, action_runner):
     url = self.file_path_url_with_scheme if self.is_file else self.url
@@ -213,13 +203,3 @@ class Page(story.Story):
       return file_path
     else:
       return os.path.dirname(file_path)
-
-  @property
-  def display_name(self):
-    if self.name:
-      return self.name
-    if self.page_set is None or not self.is_file:
-      return self.url
-    all_urls = [p.url.rstrip('/') for p in self.page_set if p.is_file]
-    common_prefix = os.path.dirname(os.path.commonprefix(all_urls))
-    return self.url[len(common_prefix):].strip('/')

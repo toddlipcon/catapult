@@ -60,17 +60,24 @@ class AppCrashException(Error):
     self._stack_trace = []
     self._app_stdout = []
     self._minidump_path = ''
+    self._system_log = '(Not implemented)'
     if app:
+      try:
+        system_log = app.platform.GetSystemLog()
+        if system_log:
+          self._system_log = system_log
+      except Exception:  # pylint: disable=broad-except
+        logging.exception('Problem when trying to gather system log:')
       try:
         self._is_valid_dump, trace_output = app.GetStackTrace()
         self._stack_trace = trace_output.splitlines()
         self._minidump_path = app.GetMostRecentMinidumpPath()
-      except Exception as err:
-        logging.error('Problem when trying to gather stack trace: %s' % err)
+      except Exception:  # pylint: disable=broad-except
+        logging.exception('Problem when trying to gather stack trace:')
       try:
         self._app_stdout = app.GetStandardOutput().splitlines()
-      except Exception as err:
-        logging.error('Problem when trying to gather standard output: %s' % err)
+      except Exception: # pylint: disable=broad-except
+        logging.exception('Problem when trying to gather standard output:')
 
   @property
   def stack_trace(self):
@@ -97,6 +104,8 @@ class AppCrashException(Error):
     debug_messages.append(divider)
     debug_messages.extend(('\t%s' % l) for l in self._app_stdout)
     debug_messages.append(divider)
+    debug_messages.append('System log:')
+    debug_messages.append(self._system_log)
     return '\n'.join(debug_messages)
 
 class DevtoolsTargetCrashException(AppCrashException):
@@ -126,6 +135,10 @@ class BrowserConnectionGoneException(BrowserGoneException):
     super(BrowserConnectionGoneException, self).__init__(app, msg)
 
 
+class TabMissingError(Error):
+  """Represents an error when an expected browser tab is not found."""
+
+
 class ProcessGoneException(Error):
   """Represents a process that no longer exists for an unknown reason."""
 
@@ -145,24 +158,41 @@ class LoginException(Error):
 
 
 class EvaluateException(Error):
-  pass
+  def __init__(self, text='', class_name='', description=None):
+    super(EvaluateException, self).__init__(text)
+    self._class_name = class_name
+    self._description = description
+
+  def __str__(self):
+    output = super(EvaluateException, self).__str__()
+    if self._class_name and self._description:
+      output += '%s:\n%s' % (self._class_name, self._description)
+    return output
 
 
-class ProfilingException(Error):
-  pass
+class StoryActionError(Error):
+  """Represents an error when trying to perform an action on a story."""
+
+
+class TracingException(Error):
+  """Represents an error that ocurred while collecting or flushing traces."""
+
+
+class AtraceTracingError(TracingException):
+  """Represents an error that ocurred while collecting traces with Atrace."""
 
 
 class PathMissingError(Error):
-  """ Represents an exception thrown when an expected path doesn't exist. """
+  """Represents an exception thrown when an expected path doesn't exist."""
 
 
 class UnknownPackageError(Error):
-  """ Represents an exception when encountering an unsupported Android APK. """
+  """Represents an exception when encountering an unsupported Android APK."""
 
 
 class PackageDetectionError(Error):
-  """ Represents an error when parsing an Android APK's package. """
+  """Represents an error when parsing an Android APK's package."""
 
 
 class AndroidDeviceParsingError(Error):
-  """Represents an error when parsing output from an android device"""
+  """Represents an error when parsing output from an android device."""

@@ -5,7 +5,8 @@
 'use strict';
 
 // A single LTHI sort of manually created from a Google search for cats.
-var g_catLTHIEvents = [
+// This cannot be const because this file may be loaded more than once.
+global.g_catLTHIEvents = [
   {
     'name': 'cc::Picture',
     'args': {
@@ -167,7 +168,7 @@ var g_catLTHIEvents = [
             'gpu_memory_usage': 22069248,
             'draws_content': 1,
             'layer_id': 6,
-            'invalidation': [],
+            'invalidation': [10, 20, 30, 40],
             'bounds': {
               'width': 1230,
               'height': 1667
@@ -207,6 +208,20 @@ var g_catLTHIEvents = [
                 ],
                 'pictures': [
                 ],
+                'debug_info': {
+                  'annotated_invalidation_rects': [
+                    {
+                      'geometry_rect': [11, 22, 33, 44],
+                      'reason': 'appeared',
+                      'client': 'client1'
+                    },
+                    {
+                      'geometry_rect': [22, 33, 44, 55],
+                      'reason': 'disappeared',
+                      'client': 'client2'
+                    },
+                  ]
+                },
                 'id': 'cc::PictureLayerImpl/LAYER_2'
               }
             ],

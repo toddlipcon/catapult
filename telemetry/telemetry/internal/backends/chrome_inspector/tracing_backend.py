@@ -11,7 +11,7 @@ import traceback
 from telemetry import decorators
 from telemetry.internal.backends.chrome_inspector import inspector_websocket
 from telemetry.internal.backends.chrome_inspector import websocket
-from telemetry.timeline import trace_data as trace_data_module
+from tracing.trace_data import trace_data as trace_data_module
 
 
 class TracingUnsupportedException(Exception):
@@ -42,15 +42,16 @@ class _DevToolsStreamReader(object):
   def __init__(self, inspector_socket, stream_handle):
     self._inspector_websocket = inspector_socket
     self._handle = stream_handle
+    self._trace_file_handle = None
     self._callback = None
-    self._data = None
 
   def Read(self, callback):
     # Do not allow the instance of this class to be reused, as
     # we only read data sequentially at the moment, so a stream
     # can only be read once.
     assert not self._callback
-    self._data = []
+    self._trace_file_handle = trace_data_module.TraceFileHandle()
+    self._trace_file_handle.Open()
     self._callback = callback
     self._ReadChunkFromStream()
     # The below is not a typo -- queue one extra read ahead to avoid latency.
@@ -65,21 +66,23 @@ class _DevToolsStreamReader(object):
 
   def _GotChunkFromStream(self, response):
     # Quietly discard responses from reads queued ahead after EOF.
-    if self._data is None:
+    if self._trace_file_handle is None:
       return
     if 'error' in response:
       raise TracingUnrecoverableException(
           'Reading trace failed: %s' % response['error']['message'])
     result = response['result']
-    self._data.append(result['data'])
+    # Convert the trace data that's receive as UTF32 to its native encoding of
+    # UTF8 in order to reduce its size.
+    self._trace_file_handle.AppendTraceData(result['data'].encode('utf8'))
     if not result.get('eof', False):
       self._ReadChunkFromStream()
       return
     req = {'method': 'IO.close', 'params': {'handle': self._handle}}
     self._inspector_websocket.SendAndIgnoreResponse(req)
-    trace_string = ''.join(self._data)
-    self._data = None
-    self._callback(trace_string)
+    self._trace_file_handle.Close()
+    self._callback(self._trace_file_handle)
+    self._trace_file_handle = None
 
 
 class TracingBackend(object):
@@ -95,6 +98,7 @@ class TracingBackend(object):
     self._start_issued = False
     self._can_collect_data = False
     self._has_received_all_tracing_data = False
+    # pylint: disable=invalid-name
     self._support_modern_devtools_tracing_start_api = (
         support_modern_devtools_tracing_start_api)
     self._trace_data_builder = None
@@ -145,10 +149,10 @@ class TracingBackend(object):
   def RecordClockSyncMarker(self, sync_id):
     assert self.is_tracing_running, 'Tracing must be running to clock sync.'
     req = {
-      'method': 'Tracing.recordClockSyncMarker',
-      'params': {
-        'syncId': sync_id
-      }
+        'method': 'Tracing.recordClockSyncMarker',
+        'params': {
+            'syncId': sync_id
+        }
     }
     rc = self._inspector_websocket.SyncRequest(req, timeout=2)
     if 'error' in rc:
@@ -167,10 +171,7 @@ class TracingBackend(object):
         # Tracing is running but start was not issued so, startup tracing must
         # be in effect. Issue another Tracing.start to update the transfer mode.
         # TODO(caseq): get rid of it when streaming is the default.
-        params = {
-          'transferMode': 'ReturnAsStream',
-          'traceConfig': {}
-        }
+        params = {'transferMode': 'ReturnAsStream', 'traceConfig': {}}
         req = {'method': 'Tracing.start', 'params': params}
         self._inspector_websocket.SendAndIgnoreResponse(req)
 
@@ -181,8 +182,11 @@ class TracingBackend(object):
     self._start_issued = False
     self._can_collect_data = True
 
-  def DumpMemory(self, timeout=30):
+  def DumpMemory(self, timeout=None):
     """Dumps memory.
+
+    Args:
+      timeout: If not specified defaults to 20 minutes.
 
     Returns:
       GUID of the generated dump if successful, None otherwise.
@@ -194,16 +198,22 @@ class TracingBackend(object):
       TracingUnexpectedResponseException: If the response contains an error
       or does not contain the expected result.
     """
-    request = {
-      'method': 'Tracing.requestMemoryDump'
-    }
+    request = {'method': 'Tracing.requestMemoryDump'}
+    if timeout is None:
+      timeout = 1200  # 20 minutes.
     try:
       response = self._inspector_websocket.SyncRequest(request, timeout)
-    except websocket.WebSocketTimeoutException:
-      raise TracingTimeoutException(
-          'Exception raised while sending a Tracing.requestMemoryDump '
-          'request:\n' + traceback.format_exc())
-    except (socket.error, websocket.WebSocketException,
+    except inspector_websocket.WebSocketException as err:
+      if issubclass(
+          err.websocket_error_type, websocket.WebSocketTimeoutException):
+        raise TracingTimeoutException(
+            'Exception raised while sending a Tracing.requestMemoryDump '
+            'request:\n' + traceback.format_exc())
+      else:
+        raise TracingUnrecoverableException(
+            'Exception raised while sending a Tracing.requestMemoryDump '
+            'request:\n' + traceback.format_exc())
+    except (socket.error,
             inspector_websocket.WebSocketDisconnected):
       raise TracingUnrecoverableException(
           'Exception raised while sending a Tracing.requestMemoryDump '
@@ -221,7 +231,7 @@ class TracingBackend(object):
     result = response['result']
     return result['dumpGuid'] if result['success'] else None
 
-  def CollectTraceData(self, trace_data_builder, timeout=30):
+  def CollectTraceData(self, trace_data_builder, timeout=60):
     if not self._can_collect_data:
       raise Exception('Cannot collect before tracing is finished.')
     self._CollectTracingData(trace_data_builder, timeout)
@@ -247,12 +257,16 @@ class TracingBackend(object):
         try:
           self._inspector_websocket.DispatchNotifications(timeout)
           start_time = time.time()
-        except websocket.WebSocketTimeoutException:
-          pass
-        except (socket.error, websocket.WebSocketException):
+        except inspector_websocket.WebSocketException as err:
+          if not issubclass(
+              err.websocket_error_type, websocket.WebSocketTimeoutException):
+            raise TracingUnrecoverableException(
+                'Exception raised while collecting tracing data:\n' +
+                traceback.format_exc())
+        except socket.error:
           raise TracingUnrecoverableException(
               'Exception raised while collecting tracing data:\n' +
-                  traceback.format_exc())
+              traceback.format_exc())
 
         if self._has_received_all_tracing_data:
           break
@@ -267,11 +281,11 @@ class TracingBackend(object):
       self._trace_data_builder = None
 
   def _NotificationHandler(self, res):
-    if 'Tracing.dataCollected' == res.get('method'):
+    if res.get('method') == 'Tracing.dataCollected':
       value = res.get('params', {}).get('value')
-      self._trace_data_builder.AddEventsTo(
-        trace_data_module.CHROME_TRACE_PART, value)
-    elif 'Tracing.tracingComplete' == res.get('method'):
+      self._trace_data_builder.AddTraceFor(trace_data_module.CHROME_TRACE_PART,
+                                           value)
+    elif res.get('method') == 'Tracing.tracingComplete':
       stream_handle = res.get('params', {}).get('stream')
       if not stream_handle:
         self._has_received_all_tracing_data = True
@@ -279,23 +293,9 @@ class TracingBackend(object):
       reader = _DevToolsStreamReader(self._inspector_websocket, stream_handle)
       reader.Read(self._ReceivedAllTraceDataFromStream)
 
-  def _ReceivedAllTraceDataFromStream(self, data):
-    trace = json.loads(data)
-    if type(trace) == dict:
-      for part in trace_data_module.ALL_TRACE_PARTS:
-        field_name = part.raw_field_name
-        if field_name in trace:
-          self._trace_data_builder.AddEventsTo(part, trace[field_name])
-
-      if 'metadata' in trace:
-        self._trace_data_builder.SetMetadataFor(
-            trace_data_module.CHROME_TRACE_PART, trace['metadata'])
-
-    elif type(trace) == list:
-      self._trace_data_builder.AddEventsTo(
-        trace_data_module.CHROME_TRACE_PART, trace)
-    else:
-      raise TracingUnexpectedResponseException('Unexpected trace type')
+  def _ReceivedAllTraceDataFromStream(self, trace_handle):
+    self._trace_data_builder.AddTraceFor(
+        trace_data_module.CHROME_TRACE_PART, trace_handle)
     self._has_received_all_tracing_data = True
 
   def Close(self):

@@ -19,7 +19,7 @@ def Run(project_config, no_browser=False,
       'Client config file to be used for telemetry should be specified through '
       'the instance of telemetry.project_config.ProjectConfig.')
   assert project_config.top_level_dir, 'Must specify top level dir for project'
-  args.extend(['--top-level-dir', project_config.top_level_dir])
+  args.extend(['--top-level-dirs', project_config.top_level_dir])
   for c in project_config.client_configs:
     args.extend(['--client-config', c])
   if no_browser and not '--no-browser' in args:
@@ -40,4 +40,12 @@ def Run(project_config, no_browser=False,
 
   path_to_run_tests = os.path.join(os.path.abspath(os.path.dirname(__file__)),
                                    'run_tests.py')
-  return subprocess.call([sys.executable, path_to_run_tests] + args, env=env)
+  exit_code = subprocess.call([sys.executable, path_to_run_tests] + args,
+                              env=env)
+  if exit_code:
+    print '**Non zero exit code**'
+    print ('If you don\'t see any error stack, this could have been a '
+           'native crash. Consider installing faulthandler '
+           '(https://faulthandler.readthedocs.io/) for more useful error '
+           'message')
+  return exit_code

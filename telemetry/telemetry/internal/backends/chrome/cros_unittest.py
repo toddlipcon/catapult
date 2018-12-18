@@ -3,13 +3,13 @@
 # found in the LICENSE file.
 
 import logging
-import urllib2
 import os
 
 from telemetry.core import exceptions
-from telemetry.core import util
 from telemetry import decorators
 from telemetry.internal.backends.chrome import cros_test_case
+
+import py_utils
 
 
 class CrOSCryptohomeTest(cros_test_case.CrOSTestCase):
@@ -21,18 +21,27 @@ class CrOSCryptohomeTest(cros_test_case.CrOSTestCase):
       self.assertEquals(1, len(b.tabs))
       self.assertTrue(b.tabs[0].url)
       self.assertTrue(self._IsCryptohomeMounted())
+      self.assertTrue(
+          self._cri.IsCryptohomeMounted(self._username, self._is_guest))
+
+      ephemeral_fs = self._cri.FilesystemMountedAt(
+          self._cri.EphemeralCryptohomePath(self._username))
 
       # TODO(achuith): Remove dependency on /home/chronos/user.
       chronos_fs = self._cri.FilesystemMountedAt('/home/chronos/user')
-      self.assertTrue(chronos_fs)
+      self.assertTrue(chronos_fs or ephemeral_fs)
       if self._is_guest:
-        self.assertEquals(chronos_fs, 'guestfs')
-      else:
+        self.assertTrue(
+            (ephemeral_fs and ephemeral_fs.startswith('/dev/loop')) or
+            (chronos_fs == 'guestfs'))
+      elif chronos_fs:
         crypto_fs = self._cri.FilesystemMountedAt(
             self._cri.CryptohomePath(self._username))
         self.assertEquals(crypto_fs, chronos_fs)
 
     self.assertFalse(self._IsCryptohomeMounted())
+    self.assertFalse(
+        self._cri.IsCryptohomeMounted(self._username, self._is_guest))
     self.assertEquals(self._cri.FilesystemMountedAt('/home/chronos/user'),
                       '/dev/mapper/encstateful')
 
@@ -51,8 +60,13 @@ class CrOSLoginTest(cros_test_case.CrOSTestCase):
     if not credentials:
       return (None, None)
 
-    user, password = credentials.split(':')
+    username, password = credentials.split(':')
+    return self._Canonicalize(username, password)
+
+  def _Canonicalize(self, user, password):
+    """Get rid of dots in username and add @gmail.com."""
     # Canonicalize.
+    user = user.lower()
     if user.find('@') == -1:
       username = user
       domain = 'gmail.com'
@@ -65,12 +79,12 @@ class CrOSLoginTest(cros_test_case.CrOSTestCase):
     return ('%s@%s' % (username, domain), password)
 
   @decorators.Enabled('chromeos')
-  def testGetCredentials(self):
-    (username, password) = self._GetCredentials('user.1:foo.1')
+  def testCanonicalize(self):
+    (username, password) = self._Canonicalize('User.1', 'foo.1')
     self.assertEquals(username, 'user1@gmail.com')
     self.assertEquals(password, 'foo.1')
 
-    (username, password) = self._GetCredentials('user.1@chromium.org:bar.1')
+    (username, password) = self._Canonicalize('user.1@chromium.org', 'bar.1')
     self.assertEquals(username, 'user.1@chromium.org')
     self.assertEquals(password, 'bar.1')
 
@@ -99,7 +113,7 @@ class CrOSLoginTest(cros_test_case.CrOSTestCase):
         extension.ExecuteJavaScript('chrome.autotestPrivate.logout();')
       except exceptions.Error:
         pass
-      util.WaitFor(lambda: not self._IsCryptohomeMounted(), 20)
+      py_utils.WaitFor(lambda: not self._IsCryptohomeMounted(), 20)
 
   @decorators.Disabled('all')
   def testGaiaLogin(self):
@@ -109,14 +123,13 @@ class CrOSLoginTest(cros_test_case.CrOSTestCase):
       return
     username, password = self._GetCredentials()
     if not username or not password:
-      username = 'powerloadtest@gmail.com'
-      password = urllib2.urlopen(
-          'https://sites.google.com/a/chromium.org/dev/chromium-os/testing/'
-          'power-testing/pltp/pltp').read().rstrip()
+      username = 'autotest.catapult'
+      password = 'autotest'
+    username, password = self._Canonicalize(username, password)
     with self._CreateBrowser(gaia_login=True,
                              username=username,
                              password=password):
-      self.assertTrue(util.WaitFor(self._IsCryptohomeMounted, 10))
+      self.assertTrue(py_utils.WaitFor(self._IsCryptohomeMounted, 10))
 
   @decorators.Enabled('chromeos')
   def testEnterpriseEnroll(self):
@@ -136,7 +149,7 @@ class CrOSLoginTest(cros_test_case.CrOSTestCase):
                                      for_user_triggered_enrollment=True)
 
     # Check for the existence of the device policy file.
-    self.assertTrue(util.WaitFor(lambda: self._cri.FileExistsOnDevice(
+    self.assertTrue(py_utils.WaitFor(lambda: self._cri.FileExistsOnDevice(
         '/home/.shadow/install_attributes.pb'), 15))
 
 
@@ -156,31 +169,31 @@ class CrOSScreenLockerTest(cros_test_case.CrOSTestCase):
     logging.info('Waiting for the lock screen')
     def ScreenLocked():
       return (browser.oobe_exists and
-          browser.oobe.EvaluateJavaScript("typeof Oobe == 'function'") and
-          browser.oobe.EvaluateJavaScript(
-          "typeof Oobe.authenticateForTesting == 'function'"))
-    util.WaitFor(ScreenLocked, 10)
+              browser.oobe.EvaluateJavaScript("typeof Oobe == 'function'") and
+              browser.oobe.EvaluateJavaScript(
+                  "typeof Oobe.authenticateForTesting == 'function'"))
+    py_utils.WaitFor(ScreenLocked, 10)
     self.assertTrue(self._IsScreenLocked(browser))
 
   def _AttemptUnlockBadPassword(self, browser):
     logging.info('Trying a bad password')
     def ErrorBubbleVisible():
-      return not browser.oobe.EvaluateJavaScript('''
-          document.getElementById('bubble').hidden
-      ''')
+      return not browser.oobe.EvaluateJavaScript(
+          "document.getElementById('bubble').hidden")
+
     self.assertFalse(ErrorBubbleVisible())
-    browser.oobe.ExecuteJavaScript('''
-        Oobe.authenticateForTesting('%s', 'bad');
-    ''' % self._username)
-    util.WaitFor(ErrorBubbleVisible, 10)
+    browser.oobe.ExecuteJavaScript(
+        "Oobe.authenticateForTesting({{ username }}, 'bad');",
+        username=self._username)
+    py_utils.WaitFor(ErrorBubbleVisible, 10)
     self.assertTrue(self._IsScreenLocked(browser))
 
   def _UnlockScreen(self, browser):
     logging.info('Unlocking')
-    browser.oobe.ExecuteJavaScript('''
-        Oobe.authenticateForTesting('%s', '%s');
-    ''' % (self._username, self._password))
-    util.WaitFor(lambda: not browser.oobe_exists, 10)
+    browser.oobe.ExecuteJavaScript(
+        'Oobe.authenticateForTesting({{ username }}, {{ password }});',
+        username=self._username, password=self._password)
+    py_utils.WaitFor(lambda: not browser.oobe_exists, 10)
     self.assertFalse(self._IsScreenLocked(browser))
 
   @decorators.Disabled('all')

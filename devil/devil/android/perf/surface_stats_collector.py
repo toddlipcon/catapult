@@ -105,15 +105,24 @@ class SurfaceStatsCollector(object):
     # The command returns nothing if it is supported, otherwise returns many
     # lines of result just like 'dumpsys SurfaceFlinger'.
     results = self._device.RunShellCommand(
-        'dumpsys SurfaceFlinger --latency-clear SurfaceView')
+        ['dumpsys', 'SurfaceFlinger', '--latency-clear', 'SurfaceView'],
+        check_return=True)
     return not len(results)
 
   def GetSurfaceFlingerPid(self):
-    results = self._device.RunShellCommand('ps | grep surfaceflinger')
-    if not results:
+    try:
+      # Returns the first matching PID found.
+      return next(p.pid for p in self._device.ListProcesses('surfaceflinger'))
+    except StopIteration:
       raise Exception('Unable to get surface flinger process id')
-    pid = results[0].split()[1]
-    return pid
+
+  def _GetSurfaceViewWindowName(self):
+    results = self._device.RunShellCommand(
+        ['dumpsys', 'SurfaceFlinger', '--list'], check_return=True)
+    for window_name in results:
+      if window_name.startswith('SurfaceView'):
+        return window_name
+    return None
 
   def _GetSurfaceFlingerFrameData(self):
     """Returns collected SurfaceFlinger frame timing data.
@@ -151,18 +160,21 @@ class SurfaceStatsCollector(object):
     # (each time the number above changes, we have a "jank").
     # If this happens a lot during an animation, the animation appears
     # janky, even if it runs at 60 fps in average.
-    #
-    # We use the special "SurfaceView" window name because the statistics for
-    # the activity's main window are not updated when the main web content is
-    # composited into a SurfaceView.
-    results = self._device.RunShellCommand(
-        'dumpsys SurfaceFlinger --latency SurfaceView')
+    window_name = self._GetSurfaceViewWindowName()
+    command = ['dumpsys', 'SurfaceFlinger', '--latency']
+    # Even if we don't find the window name, run the command to get the refresh
+    # period.
+    if window_name:
+      command.append(window_name)
+    results = self._device.RunShellCommand(command, check_return=True)
     if not len(results):
       return (None, None)
 
     timestamps = []
     nanoseconds_per_millisecond = 1e6
     refresh_period = long(results[0]) / nanoseconds_per_millisecond
+    if not window_name:
+      return (refresh_period, timestamps)
 
     # If a fence associated with a frame is still pending when we query the
     # latency data, SurfaceFlinger gives the frame a timestamp of INT64_MAX.

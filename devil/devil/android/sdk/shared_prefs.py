@@ -10,8 +10,10 @@ See e.g.:
 
 import logging
 import posixpath
-
 from xml.etree import ElementTree
+
+from devil.android import device_errors
+from devil.android.sdk import version_codes
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +167,7 @@ _PREF_TYPES = {c.tag_name: c for c in [BooleanPref, FloatPref, IntPref,
 
 class SharedPrefs(object):
 
-  def __init__(self, device, package, filename):
+  def __init__(self, device, package, filename, use_encrypted_path=False):
     """Helper object to read and update "Shared Prefs" of Android apps.
 
     Such files typically look like, e.g.:
@@ -194,12 +196,29 @@ class SharedPrefs(object):
       package: A string with the package name of the app that owns the shared
         preferences file.
       filename: A string with the name of the preferences file to read/write.
+      use_encrypted_path: Whether to read and write to the shared prefs location
+        in the device-encrypted path (/data/user_de) instead of the older,
+        unencrypted path (/data/data). Only supported on N+, but falls back to
+        the unencrypted path if the encrypted path is not supported on the given
+        device.
     """
     self._device = device
     self._xml = None
     self._package = package
     self._filename = filename
-    self._path = '/data/data/%s/shared_prefs/%s' % (package, filename)
+    self._unencrypted_path = '/data/data/%s/shared_prefs/%s' % (package,
+                                                                filename)
+    self._encrypted_path = '/data/user_de/0/%s/shared_prefs/%s' % (package,
+                                                                   filename)
+    self._path = self._unencrypted_path
+    self._encrypted = use_encrypted_path
+    if use_encrypted_path:
+      if self._device.build_version_sdk < version_codes.NOUGAT:
+        logging.info('SharedPrefs set to use encrypted path, but given device '
+                     'is not running N+. Falling back to unencrypted path')
+        self._encrypted = False
+      else:
+        self._path = self._encrypted_path
     self._changed = False
 
   def __repr__(self):
@@ -259,17 +278,45 @@ class SharedPrefs(object):
       self._xml = None
       self._changed = True
 
-  def Commit(self):
+  def Commit(self, force_commit=False):
     """Save the current set of preferences to the device.
 
-    Only actually saves if some preferences have been modified.
+    Only actually saves if some preferences have been modified or force_commit
+    is set to True.
+
+    Args:
+      force_commit: Commit even if no changes have been made to the SharedPrefs
+        instance.
     """
-    if not self.changed:
+    if not (self.changed or force_commit):
       return
     self._device.RunShellCommand(
         ['mkdir', '-p', posixpath.dirname(self.path)],
         as_root=True, check_return=True)
     self._device.WriteFile(self.path, str(self), as_root=True)
+    # Creating the directory/file can cause issues with SELinux if they did
+    # not already exist. As a workaround, apply the package's security context
+    # to the shared_prefs directory, which mimics the behavior of a file
+    # created by the app itself
+    if self._device.build_version_sdk >= version_codes.MARSHMALLOW:
+      security_context = self._device.GetSecurityContextForPackage(self.package,
+          encrypted=self._encrypted)
+      if security_context is None:
+        raise device_errors.CommandFailedError(
+            'Failed to get security context for %s' % self.package)
+      paths = [posixpath.dirname(self.path), self.path]
+      self._device.ChangeSecurityContext(security_context, paths)
+
+    # Ensure that there isn't both an encrypted and unencrypted version of the
+    # file on the device at the same time.
+    if self._device.build_version_sdk >= version_codes.NOUGAT:
+      remove_path = (self._unencrypted_path if self._encrypted
+                     else self._encrypted_path)
+      if self._device.PathExists(remove_path, as_root=True):
+        logging.warning('Found an equivalent shared prefs file at %s, removing',
+            remove_path)
+        self._device.RemovePath(remove_path, as_root=True)
+
     self._device.KillAll(self.package, exact=True, as_root=True, quiet=True)
     self._changed = False
 

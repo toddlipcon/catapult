@@ -7,6 +7,8 @@ import unittest
 
 from pyfakefs import fake_filesystem_unittest
 
+from telemetry import decorators
+from telemetry.core import exceptions
 from telemetry.core import platform
 from telemetry.core import util
 from telemetry.internal.backends.chrome import desktop_browser_finder
@@ -32,15 +34,12 @@ class FindTestBase(unittest.TestCase):
     self._catapult_path_stubs = system_stub.Override(
         desktop_browser_finder.path_module.catapult_util, ['os', 'sys'])
     self._util_stubs = system_stub.Override(util, ['os', 'sys'])
-    self._browser_finder_stubs = system_stub.Override(desktop_browser_finder,
-                                                      ['os', 'sys'])
 
   def tearDown(self):
     self._finder_stubs.Restore()
     self._path_stubs.Restore()
     self._catapult_path_stubs.Restore()
     self._util_stubs.Restore()
-    self._browser_finder_stubs.Restore()
 
   @property
   def _files(self):
@@ -48,7 +47,7 @@ class FindTestBase(unittest.TestCase):
 
   def DoFindAll(self):
     return desktop_browser_finder.FindAllAvailableBrowsers(
-      self._finder_options, desktop_device.DesktopDevice())
+        self._finder_options, desktop_device.DesktopDevice())
 
   def DoFindAllTypes(self):
     browsers = self.DoFindAll()
@@ -58,17 +57,12 @@ class FindTestBase(unittest.TestCase):
     return desktop_browser_finder.CanFindAvailableBrowsers()
 
 
-def has_type(array, browser_type):
-  return len([x for x in array if x.browser_type == browser_type]) != 0
-
-
 class FindSystemTest(FindTestBase):
   def setUp(self):
     super(FindSystemTest, self).setUp()
     self._finder_stubs.sys.platform = 'win32'
     self._path_stubs.sys.platform = 'win32'
     self._util_stubs.sys.platform = 'win32'
-    self._browser_finder_stubs.sys.platform = 'win32'
 
   def testFindProgramFiles(self):
     if not self.CanFindAvailableBrowsers():
@@ -104,7 +98,6 @@ class FindLocalBuildsTest(FindTestBase):
     self._finder_stubs.sys.platform = 'win32'
     self._path_stubs.sys.platform = 'win32'
     self._util_stubs.sys.platform = 'win32'
-    self._browser_finder_stubs.sys.platform = 'win32'
 
   def testFindBuild(self):
     if not self.CanFindAvailableBrowsers():
@@ -134,19 +127,18 @@ class OSXFindTest(FindTestBase):
     self._finder_stubs.sys.platform = 'darwin'
     self._path_stubs.sys.platform = 'darwin'
     self._util_stubs.sys.platform = 'darwin'
-    self._browser_finder_stubs.sys.platform = 'darwin'
     self._files.append('/Applications/Google Chrome Canary.app/'
                        'Contents/MacOS/Google Chrome Canary')
     self._files.append('/Applications/Google Chrome.app/' +
                        'Contents/MacOS/Google Chrome')
     self._files.append(
-      '../../../out/Release/Chromium.app/Contents/MacOS/Chromium')
+        '../../../out/Release/Chromium.app/Contents/MacOS/Chromium')
     self._files.append(
-      '../../../out/Debug/Chromium.app/Contents/MacOS/Chromium')
+        '../../../out/Debug/Chromium.app/Contents/MacOS/Chromium')
     self._files.append(
-      '../../../out/Release/Content Shell.app/Contents/MacOS/Content Shell')
+        '../../../out/Release/Content Shell.app/Contents/MacOS/Content Shell')
     self._files.append(
-      '../../../out/Debug/Content Shell.app/Contents/MacOS/Content Shell')
+        '../../../out/Debug/Content Shell.app/Contents/MacOS/Content Shell')
 
   def testFindAll(self):
     if not self.CanFindAvailableBrowsers():
@@ -154,17 +146,18 @@ class OSXFindTest(FindTestBase):
 
     types = self.DoFindAllTypes()
     self.assertEquals(
-      set(types),
-      set(['debug', 'release',
-           'content-shell-debug', 'content-shell-release',
-           'canary', 'system']))
+        set(types),
+        set([
+            'debug', 'release', 'content-shell-debug', 'content-shell-release',
+            'canary', 'system'
+        ]))
 
   def testFindExact(self):
     if not self.CanFindAvailableBrowsers():
       return
 
     self._files.append(
-      '../../../foo1/Chromium.app/Contents/MacOS/Chromium')
+        '../../../foo1/Chromium.app/Contents/MacOS/Chromium')
     self._finder_options.browser_executable = (
         '../../../foo1/Chromium.app/Contents/MacOS/Chromium')
     types = self.DoFindAllTypes()
@@ -175,7 +168,7 @@ class OSXFindTest(FindTestBase):
       return
 
     self._files.append(
-      '../../../foo1/Chromium.app/Contents/MacOS/Chromium')
+        '../../../foo1/Chromium.app/Contents/MacOS/Chromium')
     self._finder_options.browser_executable = (
         '../../../foo2/Chromium.app/Contents/MacOS/Chromium')
     self.assertRaises(Exception, self.DoFindAllTypes)
@@ -201,6 +194,7 @@ class LinuxFindTest(fake_filesystem_unittest.TestCase):
   def DoFindAllTypes(self):
     return [b.browser_type for b in self.DoFindAll()]
 
+  @decorators.Disabled('android')  # http://crbug.com/905359
   def testFindAllWithCheckout(self):
     for target in ['Release', 'Debug']:
       for browser in ['chrome', 'content_shell']:
@@ -215,20 +209,26 @@ class LinuxFindTest(fake_filesystem_unittest.TestCase):
 
     self.assertFalse(self.DoFindAllTypes())
 
+  @decorators.Disabled('android')  # http://crbug.com/905359
   def testFindWithProvidedExecutable(self):
     self.CreateBrowser('/foo/chrome')
     self._finder_options.browser_executable = '/foo/chrome'
     self.assertIn('exact', self.DoFindAllTypes())
 
-  def testFindWithProvidedApk(self):
+  def testErrorWithNonExistent(self):
     self._finder_options.browser_executable = '/foo/chrome.apk'
-    self.assertNotIn('exact', self.DoFindAllTypes())
+    with self.assertRaises(exceptions.PathMissingError) as cm:
+      self.DoFindAllTypes()
+    self.assertIn('does not exist or is not executable', str(cm.exception))
 
-  def testNoErrorWithNonChromeExecutableName(self):
+  def testErrorWithNonExecutable(self):
     self.fs.CreateFile('/foo/another_browser')
     self._finder_options.browser_executable = '/foo/another_browser'
-    self.assertNotIn('exact', self.DoFindAllTypes())
+    with self.assertRaises(exceptions.PathMissingError) as cm:
+      self.DoFindAllTypes()
+    self.assertIn('does not exist or is not executable', str(cm.exception))
 
+  @decorators.Disabled('android')  # http://crbug.com/905359
   def testFindAllWithInstalled(self):
     official_names = ['chrome', 'chrome-beta', 'chrome-unstable']
 
@@ -237,12 +237,14 @@ class LinuxFindTest(fake_filesystem_unittest.TestCase):
 
     self.assertEquals(set(self.DoFindAllTypes()), {'stable', 'beta', 'dev'})
 
+  @decorators.Disabled('android')  # http://crbug.com/905359
   def testFindAllSystem(self):
     self.CreateBrowser('/opt/google/chrome/chrome')
     os.symlink('/opt/google/chrome/chrome', '/usr/bin/google-chrome')
 
     self.assertEquals(set(self.DoFindAllTypes()), {'system', 'stable'})
 
+  @decorators.Disabled('android')  # http://crbug.com/905359
   def testFindAllSystemIsBeta(self):
     self.CreateBrowser('/opt/google/chrome/chrome')
     self.CreateBrowser('/opt/google/chrome-beta/chrome')
@@ -261,7 +263,6 @@ class WinFindTest(FindTestBase):
     self._finder_stubs.sys.platform = 'win32'
     self._path_stubs.sys.platform = 'win32'
     self._util_stubs.sys.platform = 'win32'
-    self._browser_finder_stubs.sys.platform = 'win32'
     self._path_stubs.os.local_app_data = 'c:\\Users\\Someone\\AppData\\Local'
     self._files.append('c:\\tmp\\chrome.exe')
     self._files.append('..\\..\\..\\build\\Release\\chrome.exe')

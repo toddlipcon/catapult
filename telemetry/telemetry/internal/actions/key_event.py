@@ -35,6 +35,7 @@ _AddSpecialKey('ArrowDown', 0x28)
 _AddSpecialKey('Return', 0x0D, text='\x0D')
 _AddSpecialKey('Delete', 0x2E, text='\x7F')
 _AddSpecialKey('Backspace', 0x08, text='\x08')
+_AddSpecialKey('Tab', 0x09, text='\x09')
 
 # Letter keys.
 for c in string.ascii_uppercase:
@@ -73,24 +74,35 @@ class KeyPressAction(page_action.PageAction):
 
   def __init__(self, dom_key, timeout=60):
     super(KeyPressAction, self).__init__()
+    char_code = 0 if len(dom_key) > 1 else ord(dom_key)
     self._dom_key = dom_key
-    if dom_key not in _KEY_MAP:
-      raise ValueError('No mapping for key: %s' % dom_key)
-    self._windows_virtual_key_code, self._text = _KEY_MAP[dom_key]
+    # Check that ascii chars are allowed.
+    use_key_map = len(dom_key) > 1 or char_code < 128
+    if use_key_map and dom_key not in _KEY_MAP:
+      raise ValueError('No mapping for key: %s (code=%s)' % (
+          dom_key, char_code))
+    self._windows_virtual_key_code, self._text = _KEY_MAP.get(
+        dom_key, ('', dom_key))
     self._timeout = timeout
 
   def RunAction(self, tab):
-    tab.DispatchKeyEvent(keyEventType='rawKeyDown',
-                         domKey=self._dom_key,
-                         windowsVirtualKeyCode=self._windows_virtual_key_code,
-                         timeout=self._timeout)
+    tab.DispatchKeyEvent(
+        key_event_type='rawKeyDown',
+        dom_key=self._dom_key,
+        windows_virtual_key_code=self._windows_virtual_key_code,
+        timeout=self._timeout)
     if self._text:
-      tab.DispatchKeyEvent(keyEventType='char',
-                           text=self._text,
-                           domKey=self._dom_key,
-                           windowsVirtualKeyCode=ord(self._text),
-                           timeout=self._timeout)
-    tab.DispatchKeyEvent(keyEventType='keyUp',
-                         domKey=self._dom_key,
-                         windowsVirtualKeyCode=self._windows_virtual_key_code,
-                         timeout=self._timeout)
+      tab.DispatchKeyEvent(
+          key_event_type='char',
+          text=self._text,
+          dom_key=self._dom_key,
+          windows_virtual_key_code=ord(self._text),
+          timeout=self._timeout)
+    tab.DispatchKeyEvent(
+        key_event_type='keyUp',
+        dom_key=self._dom_key,
+        windows_virtual_key_code=self._windows_virtual_key_code,
+        timeout=self._timeout)
+
+  def __str__(self):
+    return "%s('%s')" % (self.__class__.__name__, self._dom_key)

@@ -10,9 +10,9 @@ import webapp2
 import webtest
 
 from dashboard import graph_revisions
-from dashboard import stored_object
-from dashboard import testing_common
-from dashboard import utils
+from dashboard.common import stored_object
+from dashboard.common import testing_common
+from dashboard.common import utils
 from dashboard.models import graph_data
 
 
@@ -30,9 +30,15 @@ class GraphRevisionsTest(testing_common.TestCase):
     master_key = graph_data.Master(id='ChromiumPerf').put()
     for bot_name in ['win7', 'mac']:
       graph_data.Bot(id=bot_name, parent=master_key).put()
-      graph_data.TestMetadata(id='ChromiumPerf/%s/dromaeo' % bot_name).put()
+      t = graph_data.TestMetadata(id='ChromiumPerf/%s/dromaeo' % bot_name)
+      t.UpdateSheriff()
+      t.put()
+
       subtest_key = graph_data.TestMetadata(
-          id='ChromiumPerf/%s/dromaeo/dom' % bot_name, has_rows=True).put()
+          id='ChromiumPerf/%s/dromaeo/dom' % bot_name, has_rows=True)
+      subtest_key.UpdateSheriff()
+      subtest_key.put()
+
       test_container_key = utils.GetTestContainerKey(subtest_key)
       for rev in range(15000, 16000, 5):
         row = graph_data.Row(parent=test_container_key,
@@ -63,6 +69,14 @@ class GraphRevisionsTest(testing_common.TestCase):
     response = self.testapp.post(
         '/graph_revisions', {'test_path': 'ChromiumPerf/win7/dromaeo/dom'})
     self.assertEqual([[1, 2, 3]], json.loads(response.body))
+
+  def testPost_CacheSet_NanBecomesNone(self):
+    stored_object.Set(
+        'externally_visible__num_revisions_ChromiumPerf/win7/dromaeo/dom',
+        [[1, 2, 3], [4, float('nan'), 6]])
+    response = self.testapp.post(
+        '/graph_revisions', {'test_path': 'ChromiumPerf/win7/dromaeo/dom'})
+    self.assertEqual([[1, 2, 3], [4, None, 6]], json.loads(response.body))
 
   def testAddRowsToCache(self):
     self._AddMockData()

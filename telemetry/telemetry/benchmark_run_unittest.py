@@ -14,28 +14,34 @@ import mock
 
 # pylint: disable=abstract-method
 class DummyPageTest(legacy_page_test.LegacyPageTest):
+
   def __init__(self):
     super(DummyPageTest, self).__init__()
     # Without disabling the above warning, this complains that
     # ValidateAndMeasurePage is abstract; but defining it complains
     # that its definition is overridden here.
-    self.ValidateAndMeasurePage = mock.Mock()
+    self.ValidateAndMeasurePage = mock.Mock() # pylint: disable=invalid-name
 
 
 # More end-to-end tests of Benchmark, shared_page_state and associated
 # classes using telemetry.testing.fakes, to avoid needing to construct
 # a real browser instance.
 
+
 class FakePage(page_module.Page):
+
   def __init__(self, page_set):
     super(FakePage, self).__init__(
-      url='http://nonexistentserver.com/nonexistentpage.html',
-      page_set=page_set,
-      shared_page_state_class=fakes.FakeSharedPageState)
-    self.RunNavigateSteps = mock.Mock()
-    self.RunPageInteractions = mock.Mock()
+        url='http://nonexistentserver.com/nonexistentpage.html',
+        name='fake page',
+        page_set=page_set,
+        shared_page_state_class=fakes.FakeSharedPageState)
+    self.RunNavigateSteps = mock.Mock() # pylint: disable=invalid-name
+    self.RunPageInteractions = mock.Mock() # pylint: disable=invalid-name
+
 
 class FakeBenchmark(benchmark_module.Benchmark):
+
   def __init__(self, max_failures=None):
     super(FakeBenchmark, self).__init__(max_failures)
     self._fake_pages = []
@@ -64,13 +70,15 @@ class FakeBenchmark(benchmark_module.Benchmark):
 
 
 class FailingPage(FakePage):
+
   def __init__(self, page_set):
     super(FailingPage, self).__init__(page_set)
     self.RunNavigateSteps.side_effect = Exception('Deliberate exception')
 
 
 class BenchmarkRunTest(unittest.TestCase):
-  def setupBenchmark(self):
+
+  def setupBenchmark(self): # pylint: disable=invalid-name
     finder_options = fakes.CreateBrowserFinderOptions()
     finder_options.browser_options.platform = fakes.FakeLinuxPlatform()
     finder_options.output_formats = ['none']
@@ -95,16 +103,16 @@ class BenchmarkRunTest(unittest.TestCase):
     page.RunNavigateSteps = manager.page.RunNavigateSteps
     page.RunPageInteractions = manager.page.RunPageInteractions
     benchmark.validator.ValidateAndMeasurePage = (
-      manager.validator.ValidateAndMeasurePage)
+        manager.validator.ValidateAndMeasurePage)
     benchmark.AddFakePage(page)
-    self.assertEqual(benchmark.Run(finder_options), 0,
-                     'Test should run with no errors')
-    expected = [mock.call.page.RunNavigateSteps(mock.ANY),
-                mock.call.page.RunPageInteractions(mock.ANY),
-                mock.call.validator.ValidateAndMeasurePage(
-                  page, mock.ANY, mock.ANY)]
+    self.assertEqual(
+        benchmark.Run(finder_options), 0, 'Test should run with no errors')
+    expected = [
+        mock.call.page.RunNavigateSteps(mock.ANY),
+        mock.call.page.RunPageInteractions(mock.ANY),
+        mock.call.validator.ValidateAndMeasurePage(page, mock.ANY, mock.ANY)
+    ]
     self.assertTrue(manager.mock_calls == expected)
-
 
   def testFailingPage(self):
     benchmark, finder_options = self.setupBenchmark()

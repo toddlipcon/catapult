@@ -29,21 +29,20 @@ class AppBackend(object):
   def app_type(self):
     return self._app_type
 
-  @property
-  def pid(self):
+  def GetPid(self):
     raise NotImplementedError
 
   @property
   def platform_backend(self):
     return self._platform_backend
 
-  def Start(self):
-    raise NotImplementedError
-
   def Foreground(self):
     # TODO(catapult:#2194): Remove the unnecessary pass below when the method
     # has been implemented on all concrete subclasses.
     pass  # pylint: disable=unnecessary-pass
+    raise NotImplementedError
+
+  def Background(self):
     raise NotImplementedError
 
   def Close(self):

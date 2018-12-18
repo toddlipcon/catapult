@@ -23,13 +23,15 @@ logger = logging.getLogger(__name__)
 
 class LogcatMonitor(object):
 
-  _RECORD_THREAD_JOIN_WAIT = 2.0
+  _RECORD_ITER_TIMEOUT = 0.2
+  _RECORD_THREAD_JOIN_WAIT = 5.0
   _WAIT_TIME = 0.2
-  _THREADTIME_RE_FORMAT = (
+  THREADTIME_RE_FORMAT = (
       r'(?P<date>\S*) +(?P<time>\S*) +(?P<proc_id>%s) +(?P<thread_id>%s) +'
       r'(?P<log_level>%s) +(?P<component>%s) *: +(?P<message>%s)$')
 
-  def __init__(self, adb, clear=True, filter_specs=None, output_file=None):
+  def __init__(self, adb, clear=True, filter_specs=None, output_file=None,
+               transform_func=None):
     """Create a LogcatMonitor instance.
 
     Args:
@@ -37,6 +39,8 @@ class LogcatMonitor(object):
       clear: If True, clear the logcat when monitoring starts.
       filter_specs: An optional list of '<tag>[:priority]' strings.
       output_file: File path to save recorded logcat.
+      transform_func: An optional unary callable that takes and returns
+        a list of lines, possibly transforming them in the process.
     """
     if isinstance(adb, adb_wrapper.AdbWrapper):
       self._adb = adb
@@ -49,6 +53,7 @@ class LogcatMonitor(object):
     self._record_file_lock = threading.Lock()
     self._record_thread = None
     self._stop_recording_event = threading.Event()
+    self._transform_func = transform_func
 
   @property
   def output_file(self):
@@ -145,7 +150,7 @@ class LogcatMonitor(object):
       component = r'[^\s:]+'
     # pylint: disable=protected-access
     threadtime_re = re.compile(
-        type(self)._THREADTIME_RE_FORMAT % (
+        type(self).THREADTIME_RE_FORMAT % (
             proc_id, thread_id, log_level, component, message_regex))
 
     with open(self._record_file.name, 'r') as f:
@@ -164,11 +169,19 @@ class LogcatMonitor(object):
       # Write the log with line buffering so the consumer sees each individual
       # line.
       for data in self._adb.Logcat(filter_specs=self._filter_specs,
-                                   logcat_format='threadtime'):
+                                   logcat_format='threadtime',
+                                   iter_timeout=self._RECORD_ITER_TIMEOUT):
+        if self._stop_recording_event.isSet():
+          return
+
+        if data is None:
+          # Logcat can yield None if the iter_timeout is hit.
+          continue
+
         with self._record_file_lock:
-          if self._stop_recording_event.isSet():
-            return
           if self._record_file and not self._record_file.closed:
+            if self._transform_func:
+              data = '\n'.join(self._transform_func([data]))
             self._record_file.write(data + '\n')
 
     self._stop_recording_event.clear()
@@ -220,6 +233,13 @@ class LogcatMonitor(object):
       if self._record_file:
         self._record_file.close()
         self._record_file = None
+
+  def close(self):
+    """An alias for Close.
+
+    Allows LogcatMonitors to be used with contextlib.closing.
+    """
+    self.Close()
 
   def __enter__(self):
     """Starts the logcat monitor."""

@@ -14,12 +14,12 @@ class TracingController(tracing_agent.TracingAgent):
     self._tracing_controller_backend = tracing_controller_backend
 
   @property
-  def iteration_info(self):
-    return self._tracing_controller_backend.iteration_info
+  def telemetry_info(self):
+    return self._tracing_controller_backend.telemetry_info
 
-  @iteration_info.setter
-  def iteration_info(self, ii):
-    self._tracing_controller_backend.iteration_info = ii
+  @telemetry_info.setter
+  def telemetry_info(self, ii):
+    self._tracing_controller_backend.telemetry_info = ii
 
   def StartTracing(self, tracing_config, timeout=10):
     """Starts tracing.
@@ -43,16 +43,17 @@ class TracingController(tracing_agent.TracingAgent):
     self._tracing_controller_backend.StartTracing(tracing_config, timeout)
 
   def StopTracing(self):
-    """Stops tracing and returns a TraceValue."""
+    """Stops tracing and returns a tuple of (trace_value,
+    nonfatal_exceptions_list).
+
+    Where:
+      trace_value: an instance of trace_value.TraceValue
+      nonfatal_exceptions_list: a list of exceptions (type Exception)
+    """
     return self._tracing_controller_backend.StopTracing()
 
   def FlushTracing(self):
-    """Flush tracing buffer and continue tracing.
-
-    Warning: This method is a temporary hack to enable multi-tab benchmarks
-    (see https://goo.gl/8Gjstr). Please contact Telemetry owners before using
-    it.
-    """
+    """Flush tracing buffer and continue tracing."""
     self._tracing_controller_backend.FlushTracing()
 
   @property

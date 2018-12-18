@@ -4,8 +4,8 @@
 import logging as real_logging
 import os
 import sys
+import time
 
-from telemetry.core import discover
 from telemetry.core import local_server
 from telemetry.core import memory_cache_http_server
 from telemetry.core import network_controller
@@ -14,14 +14,16 @@ from telemetry.core import util
 from telemetry.internal.platform import (platform_backend as
                                          platform_backend_module)
 
-_host_platform = None
+from py_utils import discover
+
+_HOST_PLATFORM = None
 # Remote platform is a dictionary from device ids to remote platform instances.
-_remote_platforms = {}
+_REMOTE_PLATFORMS = {}
 
 
 def _InitHostPlatformIfNeeded():
-  global _host_platform
-  if _host_platform:
+  global _HOST_PLATFORM # pylint: disable=global-statement
+  if _HOST_PLATFORM:
     return
   backend = None
   backends = _IterAllPlatformBackendClasses()
@@ -31,12 +33,12 @@ def _InitHostPlatformIfNeeded():
       break
   if not backend:
     raise NotImplementedError()
-  _host_platform = Platform(backend)
+  _HOST_PLATFORM = Platform(backend)
 
 
 def GetHostPlatform():
   _InitHostPlatformIfNeeded()
-  return _host_platform
+  return _HOST_PLATFORM
 
 
 def _IterAllPlatformBackendClasses():
@@ -52,15 +54,15 @@ def GetPlatformForDevice(device, finder_options, logging=real_logging):
     Args:
       device: a device.Device instance.
   """
-  if device.guid in _remote_platforms:
-    return _remote_platforms[device.guid]
+  if device.guid in _REMOTE_PLATFORMS:
+    return _REMOTE_PLATFORMS[device.guid]
   try:
     for platform_backend_class in _IterAllPlatformBackendClasses():
       if platform_backend_class.SupportsDevice(device):
-        _remote_platforms[device.guid] = (
+        _REMOTE_PLATFORMS[device.guid] = (
             platform_backend_class.CreatePlatformForDevice(device,
                                                            finder_options))
-        return _remote_platforms[device.guid]
+        return _REMOTE_PLATFORMS[device.guid]
     return None
   except Exception:
     current_exception = sys.exc_info()
@@ -87,6 +89,7 @@ class Platform(object):
     self._local_server_controller = local_server.LocalServerController(
         self._platform_backend)
     self._is_monitoring_power = False
+    self._forwarder = None
 
   @property
   def is_host_platform(self):
@@ -101,6 +104,9 @@ class Platform(object):
   def tracing_controller(self):
     return self._tracing_controller
 
+  def Initialize(self):
+    pass
+
   def CanMonitorThermalThrottling(self):
     """Platforms may be able to detect thermal throttling.
 
@@ -109,6 +115,9 @@ class Platform(object):
     API to detect if this has happened and interpret results accordingly.
     """
     return self._platform_backend.CanMonitorThermalThrottling()
+
+  def GetSystemLog(self):
+    return self._platform_backend.GetSystemLog()
 
   def IsThermallyThrottled(self):
     """Returns True if the device is currently thermally throttled."""
@@ -136,6 +145,12 @@ class Platform(object):
     Examples: WIN, MAC, LINUX, CHROMEOS"""
     return self._platform_backend.GetOSName()
 
+  def GetDeviceId(self):
+    """Returns a string identifying the device.
+
+    Examples: 0123456789abcdef"""
+    return self._platform_backend.GetDeviceId()
+
   def GetOSVersionName(self):
     """Returns a logically sortable, string-like description of the Platform OS
     version.
@@ -143,18 +158,19 @@ class Platform(object):
     Examples: VISTA, WIN7, LION, MOUNTAINLION"""
     return self._platform_backend.GetOSVersionName()
 
-  def GetOSVersionNumber(self):
-    """Returns an integer description of the Platform OS major version.
+  def GetOSVersionDetailString(self):
+    """Returns more detailed information about the OS version than
+    GetOSVersionName, if available. Otherwise returns the empty string.
 
-    Examples: On Mac, 13 for Mavericks, 14 for Yosemite."""
-    return self._platform_backend.GetOSVersionNumber()
+    Examples: '10.12.4' on macOS."""
+    return self._platform_backend.GetOSVersionDetailString()
 
   def GetSystemTotalPhysicalMemory(self):
     """Returns an integer with the total physical memory in bytes."""
     return self._platform_backend.GetSystemTotalPhysicalMemory()
 
   def CanFlushIndividualFilesFromSystemCache(self):
-    """Returns true if the disk cache can be flushed for specific files."""
+    """Returns true if the disk cache can be flushed for individual files."""
     return self._platform_backend.CanFlushIndividualFilesFromSystemCache()
 
   def SupportFlushEntireSystemCache(self):
@@ -164,19 +180,30 @@ class Platform(object):
     """
     return self._platform_backend.SupportFlushEntireSystemCache()
 
+  def _WaitForPageCacheToBeDropped(self):
+    # There seems to be no reliable way to wait for all pages to be dropped from
+    # the OS page cache (also known as 'file cache'). There is no guaranteed
+    # moment in time when everything is out of page cache. A number of pages
+    # will likely be reused before other pages are evicted. While individual
+    # files can be watched in limited ways, we choose not to be clever.
+    time.sleep(2)
+
   def FlushEntireSystemCache(self):
     """Flushes the OS's file cache completely.
 
     This function may require root or administrator access. Clients should
     call SupportFlushEntireSystemCache to check first.
     """
-    return self._platform_backend.FlushEntireSystemCache()
+    self._platform_backend.FlushEntireSystemCache()
+    self._WaitForPageCacheToBeDropped()
 
-  def FlushSystemCacheForDirectory(self, directory):
+  def FlushSystemCacheForDirectories(self, directories):
     """Flushes the OS's file cache for the specified directory.
 
     This function does not require root or administrator access."""
-    return self._platform_backend.FlushSystemCacheForDirectory(directory)
+    for path in directories:
+      self._platform_backend.FlushSystemCacheForDirectory(path)
+    self._WaitForPageCacheToBeDropped()
 
   def FlushDnsCache(self):
     """Flushes the OS's DNS cache completely.
@@ -199,6 +226,10 @@ class Platform(object):
         application,
         parameters,
         elevate_privilege=elevate_privilege)
+
+  def StartActivity(self, intent, blocking=False):
+    """Starts an activity for the given intent on the device."""
+    return self._platform_backend.StartActivity(intent, blocking)
 
   def IsApplicationRunning(self, application):
     """Returns whether an application is currently running."""
@@ -364,6 +395,13 @@ class Platform(object):
     """
     return self._platform_backend.TakeScreenshot(file_path)
 
+  def SetFullPerformanceModeEnabled(self, enabled):
+    """ Set full performance mode on the platform.
+
+    Note: this can be no-op on certain platforms.
+    """
+    return self._platform_backend.SetFullPerformanceModeEnabled(enabled)
+
   def StartLocalServer(self, server):
     """Starts a LocalServer and associates it with this platform.
     |server.Close()| should be called manually to close the started server.
@@ -372,6 +410,8 @@ class Platform(object):
 
   @property
   def http_server(self):
+    # TODO(crbug.com/799490): Ownership of the local server should be moved
+    # to the network_controller.
     return self._local_server_controller.GetRunningServer(
         memory_cache_http_server.MemoryCacheHTTPServer, None)
 
@@ -406,11 +446,18 @@ class Platform(object):
 
   def StopAllLocalServers(self):
     self._local_server_controller.Close()
+    if self._forwarder:
+      self._forwarder.Close()
 
   @property
   def local_servers(self):
     """Returns the currently running local servers."""
     return self._local_server_controller.local_servers
 
-  def HasBattOrConnected(self):
-    return  self._platform_backend.HasBattOrConnected()
+  def WaitForBatteryTemperature(self, temp):
+    """Waits for the battery on the device under test to cool down to temp.
+
+    Args:
+      temp: temperature target in degrees C.
+    """
+    return self._platform_backend.WaitForBatteryTemperature(temp)

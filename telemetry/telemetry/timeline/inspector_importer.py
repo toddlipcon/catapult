@@ -6,7 +6,7 @@
 from telemetry.timeline import importer
 import telemetry.timeline.slice as tracing_slice
 import telemetry.timeline.thread as timeline_thread
-from telemetry.timeline import trace_data as trace_data_module
+from tracing.trace_data import trace_data as trace_data_module
 
 
 class InspectorTimelineImporter(importer.TimelineImporter):
@@ -14,8 +14,10 @@ class InspectorTimelineImporter(importer.TimelineImporter):
     super(InspectorTimelineImporter, self).__init__(model,
                                                     trace_data,
                                                     import_order=1)
-    self._events = trace_data.GetTraceFor(
-      trace_data_module.INSPECTOR_TRACE_PART)
+    traces = trace_data.GetTracesFor(
+        trace_data_module.INSPECTOR_TRACE_PART)
+    assert len(traces) == 1
+    self._events = traces[0]
 
   @staticmethod
   def GetSupportedPart():
@@ -46,11 +48,11 @@ class InspectorTimelineImporter(importer.TimelineImporter):
       end_time = raw_inspector_event.get('endTime', start_time)
 
       pending_slice = tracing_slice.Slice(
-        thread, 'inspector',
-        raw_inspector_event['type'],
-        start_time,
-        thread_timestamp=None,
-        args=args)
+          thread, 'inspector',
+          raw_inspector_event['type'],
+          start_time,
+          thread_timestamp=None,
+          args=args)
 
     for child in raw_inspector_event.get('children', []):
       InspectorTimelineImporter.AddRawEventToThreadRecursive(

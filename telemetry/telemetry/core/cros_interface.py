@@ -93,6 +93,8 @@ class DNSFailureException(LoginException):
 
 class CrOSInterface(object):
 
+  _DEFAULT_SSH_CONNECTION_TIMEOUT = 5
+
   def __init__(self, hostname=None, ssh_port=None, ssh_identity=None):
     self._hostname = hostname
     self._ssh_port = ssh_port
@@ -104,7 +106,7 @@ class CrOSInterface(object):
       return
 
     self._ssh_identity = None
-    self._ssh_args = ['-o ConnectTimeout=5', '-o StrictHostKeyChecking=no',
+    self._ssh_args = ['-o StrictHostKeyChecking=no',
                       '-o KbdInteractiveAuthentication=no',
                       '-o PreferredAuthentications=publickey',
                       '-o UserKnownHostsFile=/dev/null', '-o ControlMaster=no']
@@ -142,7 +144,8 @@ class CrOSInterface(object):
   def ssh_port(self):
     return self._ssh_port
 
-  def FormSSHCommandLine(self, args, extra_ssh_args=None):
+  def FormSSHCommandLine(self, args, extra_ssh_args=None, port_forward=False,
+                         connect_timeout=None):
     """Constructs a subprocess-suitable command line for `ssh'.
     """
     if self.local:
@@ -152,8 +155,17 @@ class CrOSInterface(object):
       # connection to run remote commands (crbug.com/239607).
       return ['sh', '-c', " ".join(args)]
 
-    full_args = ['ssh', '-o ForwardX11=no', '-o ForwardX11Trusted=no', '-n',
-                 '-S', self._ssh_control_file] + self._ssh_args
+    full_args = ['ssh', '-o ForwardX11=no', '-o ForwardX11Trusted=no', '-n']
+    if connect_timeout:
+      full_args += ['-o ConnectTimeout=%d' % connect_timeout]
+    else:
+      full_args += [
+          '-o ConnectTimeout=%d' % self._DEFAULT_SSH_CONNECTION_TIMEOUT]
+    # As remote port forwarding might conflict with the control socket
+    # sharing, skip the control socket args if it is for remote port forwarding.
+    if not port_forward:
+      full_args += ['-S', self._ssh_control_file]
+    full_args += self._ssh_args
     if self._ssh_identity is not None:
       full_args.extend(['-i', self._ssh_identity])
     if extra_ssh_args:
@@ -200,23 +212,23 @@ class CrOSInterface(object):
                                     dest,
                                     extra_scp_args=extra_scp_args)
 
-  def _RemoveSSHWarnings(self, toClean):
+  def _RemoveSSHWarnings(self, to_clean):
     """Removes specific ssh warning lines from a string.
 
     Args:
-      toClean: A string that may be containing multiple lines.
+      to_clean: A string that may be containing multiple lines.
 
     Returns:
-      A copy of toClean with all the Warning lines removed.
+      A copy of to_clean with all the Warning lines removed.
     """
     # Remove the Warning about connecting to a new host for the first time.
     return re.sub(
         r'Warning: Permanently added [^\n]* to the list of known hosts.\s\n',
-        '', toClean)
+        '', to_clean)
 
-  def RunCmdOnDevice(self, args, cwd=None, quiet=False):
+  def RunCmdOnDevice(self, args, cwd=None, quiet=False, connect_timeout=None):
     stdout, stderr = GetAllCmdOutput(
-        self.FormSSHCommandLine(args),
+        self.FormSSHCommandLine(args, connect_timeout=connect_timeout),
         cwd,
         quiet=quiet)
     # The initial login will add the host to the hosts file but will also print
@@ -227,7 +239,10 @@ class CrOSInterface(object):
   def TryLogin(self):
     logging.debug('TryLogin()')
     assert not self.local
-    stdout, stderr = self.RunCmdOnDevice(['echo', '$USER'], quiet=True)
+    # Initial connection may take a bit to establish (especially if the
+    # VM/device just booted up). So bump the default timeout.
+    stdout, stderr = self.RunCmdOnDevice(
+        ['echo', '$USER'], quiet=True, connect_timeout=60)
     if stderr != '':
       if 'Host key verification failed' in stderr:
         raise LoginException(('%s host key verification failed. ' +
@@ -271,7 +286,7 @@ class CrOSInterface(object):
   def PushFile(self, filename, remote_filename):
     if self.local:
       args = ['cp', '-r', filename, remote_filename]
-      stdout, stderr = GetAllCmdOutput(args, quiet=True)
+      _, stderr = GetAllCmdOutput(args, quiet=True)
       if stderr != '':
         raise OSError('No such file or directory %s' % stderr)
       return
@@ -281,7 +296,7 @@ class CrOSInterface(object):
         remote_filename,
         extra_scp_args=['-r'])
 
-    stdout, stderr = GetAllCmdOutput(args, quiet=True)
+    _, stderr = GetAllCmdOutput(args, quiet=True)
     stderr = self._RemoveSSHWarnings(stderr)
     if stderr != '':
       raise OSError('No such file or directory %s' % stderr)
@@ -314,7 +329,7 @@ class CrOSInterface(object):
       destfile = os.path.basename(filename)
     args = self._FormSCPFromRemote(filename, os.path.abspath(destfile))
 
-    stdout, stderr = GetAllCmdOutput(args, quiet=True)
+    _, stderr = GetAllCmdOutput(args, quiet=True)
     stderr = self._RemoveSSHWarnings(stderr)
     if stderr != '':
       raise OSError('No such file or directory %s' % stderr)
@@ -334,6 +349,15 @@ class CrOSInterface(object):
         res = f2.read()
         logging.debug("GetFileContents(%s)->%s" % (filename, res))
         return res
+
+  def HasSystemd(self):
+    """Return True or False to indicate if systemd is used.
+
+    Note: This function checks to see if the 'systemctl' utilitary
+    is installed. This is only installed along with the systemd daemon.
+    """
+    _, stderr = self.RunCmdOnDevice(['systemctl'], quiet=True)
+    return stderr == ''
 
   def ListProcesses(self):
     """Returns (pid, cmd, ppid, state) of all processes on the device."""
@@ -416,9 +440,17 @@ class CrOSInterface(object):
     return len(kills) - 2
 
   def IsServiceRunning(self, service_name):
-    stdout, stderr = self.RunCmdOnDevice(['status', service_name], quiet=True)
+    """Check with the init daemon if the given service is running."""
+    if self.HasSystemd():
+      # Querying for the pid of the service will return 'MainPID=0' if
+      # the service is not running.
+      stdout, stderr = self.RunCmdOnDevice(
+          ['systemctl', 'show', '-p', 'MainPID', service_name], quiet=True)
+      running = int(stdout.split('=')[1]) != 0
+    else:
+      stdout, stderr = self.RunCmdOnDevice(['status', service_name], quiet=True)
+      running = 'running, process' in stdout
     assert stderr == '', stderr
-    running = 'running, process' in stdout
     logging.debug("IsServiceRunning(%s)->%s" % (service_name, running))
     return running
 
@@ -450,16 +482,26 @@ class CrOSInterface(object):
 
     return True
 
-  def FilesystemMountedAt(self, path):
-    """Returns the filesystem mounted at |path|"""
-    df_out, _ = self.RunCmdOnDevice(['/bin/df', path])
+  def _GetMountSourceAndTarget(self, path):
+    df_out, _ = self.RunCmdOnDevice(['/bin/df', '--output=source,target', path])
     df_ary = df_out.split('\n')
     # 3 lines for title, mount info, and empty line.
     if len(df_ary) == 3:
       line_ary = df_ary[1].split()
-      if line_ary:
-        return line_ary[0]
+      return line_ary if len(line_ary) == 2 else None
     return None
+
+  def FilesystemMountedAt(self, path):
+    """Returns the filesystem mounted at |path|"""
+    mount_info = self._GetMountSourceAndTarget(path)
+    return mount_info[0] if mount_info else None
+
+  def EphemeralCryptohomePath(self, user):
+    """Returns the ephemeral cryptohome mount poing for |user|."""
+    profile_path = self.CryptohomePath(user)
+    # Get user hash as last element of cryptohome path last.
+    return os.path.join('/run/cryptohome/ephemeral_mount/',
+                        os.path.basename(profile_path))
 
   def CryptohomePath(self, user):
     """Returns the cryptohome mount point for |user|."""
@@ -471,10 +513,21 @@ class CrOSInterface(object):
 
   def IsCryptohomeMounted(self, username, is_guest):
     """Returns True iff |user|'s cryptohome is mounted."""
+    # Check whether it's ephemeral mount from a loop device.
+    profile_ephemeral_path = self.EphemeralCryptohomePath(username)
+    ephemeral_mount_info = self._GetMountSourceAndTarget(profile_ephemeral_path)
+    if ephemeral_mount_info:
+      return (ephemeral_mount_info[0].startswith('/dev/loop') and
+              ephemeral_mount_info[1] == profile_ephemeral_path)
+
     profile_path = self.CryptohomePath(username)
-    mount = self.FilesystemMountedAt(profile_path)
-    mount_prefix = 'guestfs' if is_guest else '/home/.shadow/'
-    return mount and mount.startswith(mount_prefix)
+    mount_info = self._GetMountSourceAndTarget(profile_path)
+    if mount_info:
+      # Checks if the filesytem at |profile_path| is mounted on |profile_path|
+      # itself. Before mounting cryptohome, it shows an upper directory (/home).
+      is_guestfs = (mount_info[0] == 'guestfs')
+      return is_guestfs == is_guest and mount_info[1] == profile_path
+    return False
 
   def TakeScreenshot(self, file_path):
     stdout, stderr = self.RunCmdOnDevice(
@@ -485,22 +538,22 @@ class CrOSInterface(object):
     """Takes a screenshot, useful for debugging failures."""
     # TODO(achuith): Find a better location for screenshots. Cros autotests
     # upload everything in /var/log so use /var/log/screenshots for now.
-    SCREENSHOT_DIR = '/var/log/screenshots/'
-    SCREENSHOT_EXT = '.png'
+    screenshot_dir = '/var/log/screenshots/'
+    screenshot_ext = '.png'
 
-    self.RunCmdOnDevice(['mkdir', '-p', SCREENSHOT_DIR])
+    self.RunCmdOnDevice(['mkdir', '-p', screenshot_dir])
     # Large number of screenshots can increase hardware lab bandwidth
     # dramatically, so keep this number low. crbug.com/524814.
     for i in xrange(2):
       screenshot_file = ('%s%s-%d%s' %
-                         (SCREENSHOT_DIR, screenshot_prefix, i, SCREENSHOT_EXT))
+                         (screenshot_dir, screenshot_prefix, i, screenshot_ext))
       if not self.FileExistsOnDevice(screenshot_file):
         return self.TakeScreenshot(screenshot_file)
     logging.warning('screenshot directory full.')
     return False
 
   def GetArchName(self):
-    return self.RunCmdOnDevice(['uname', '-m'])[0]
+    return self.RunCmdOnDevice(['uname', '-m'])[0].rstrip()
 
   def IsRunningOnVM(self):
     return self.RunCmdOnDevice(['crossystem', 'inside_vm'])[0] != '0'
@@ -520,15 +573,22 @@ class CrOSInterface(object):
 
   def RestartUI(self, clear_enterprise_policy):
     logging.info('(Re)starting the ui (logs the user out)')
+    start_cmd = ['start', 'ui']
+    restart_cmd = ['restart', 'ui']
+    stop_cmd = ['stop', 'ui']
+    if self.HasSystemd():
+      start_cmd.insert(0, 'systemctl')
+      restart_cmd.insert(0, 'systemctl')
+      stop_cmd.insert(0, 'systemctl')
     if clear_enterprise_policy:
-      self.RunCmdOnDevice(['stop', 'ui'])
+      self.RunCmdOnDevice(stop_cmd)
       self.RmRF('/var/lib/whitelist/*')
       self.RmRF(r'/home/chronos/Local\ State')
 
     if self.IsServiceRunning('ui'):
-      self.RunCmdOnDevice(['restart', 'ui'])
+      self.RunCmdOnDevice(restart_cmd)
     else:
-      self.RunCmdOnDevice(['start', 'ui'])
+      self.RunCmdOnDevice(start_cmd)
 
   def CloseConnection(self):
     if not self.local:

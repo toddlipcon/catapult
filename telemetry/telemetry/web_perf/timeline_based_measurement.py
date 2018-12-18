@@ -3,7 +3,8 @@
 # found in the LICENSE file.
 import collections
 import logging
-from collections import defaultdict
+import os
+import time
 
 from tracing.metrics import metric_runner
 
@@ -13,15 +14,6 @@ from telemetry.timeline import tracing_config
 from telemetry.value import trace
 from telemetry.value import common_value_helpers
 from telemetry.web_perf.metrics import timeline_based_metric
-from telemetry.web_perf.metrics import blob_timeline
-from telemetry.web_perf.metrics import jitter_timeline
-from telemetry.web_perf.metrics import webrtc_rendering_timeline
-from telemetry.web_perf.metrics import gpu_timeline
-from telemetry.web_perf.metrics import indexeddb_timeline
-from telemetry.web_perf.metrics import layout
-from telemetry.web_perf.metrics import smoothness
-from telemetry.web_perf.metrics import text_selection
-from telemetry.web_perf import smooth_gesture_util
 from telemetry.web_perf import story_test
 from telemetry.web_perf import timeline_interaction_record as tir_module
 
@@ -34,24 +26,10 @@ DEFAULT_OVERHEAD_LEVEL = 'default-overhead'
 DEBUG_OVERHEAD_LEVEL = 'debug-overhead'
 
 ALL_OVERHEAD_LEVELS = [
-  LOW_OVERHEAD_LEVEL,
-  DEFAULT_OVERHEAD_LEVEL,
-  DEBUG_OVERHEAD_LEVEL,
+    LOW_OVERHEAD_LEVEL,
+    DEFAULT_OVERHEAD_LEVEL,
+    DEBUG_OVERHEAD_LEVEL,
 ]
-
-
-def _GetAllLegacyTimelineBasedMetrics():
-  # TODO(nednguyen): use discovery pattern to return all the instances of
-  # all TimelineBasedMetrics class in web_perf/metrics/ folder.
-  # This cannot be done until crbug.com/460208 is fixed.
-  return (smoothness.SmoothnessMetric(),
-          layout.LayoutMetric(),
-          gpu_timeline.GPUTimelineMetric(),
-          blob_timeline.BlobTimelineMetric(),
-          jitter_timeline.JitterTimelineMetric(),
-          text_selection.TextSelectionMetric(),
-          indexeddb_timeline.IndexedDBTimelineMetric(),
-          webrtc_rendering_timeline.WebRtcRenderingTimelineMetric())
 
 
 class InvalidInteractions(Exception):
@@ -85,34 +63,26 @@ class _TBMResultWrapper(ResultsWrapperInterface):
     if value.tir_label:
       assert value.tir_label == self._tir_label
     else:
-      logging.warning(
-          'TimelineBasedMetric should create the interaction record label '
-          'for %r values.' % value.name)
       value.tir_label = self._tir_label
     self._results.AddValue(value)
 
 
 def _GetRendererThreadsToInteractionRecordsMap(model):
-  threads_to_records_map = defaultdict(list)
+  threads_to_records_map = collections.defaultdict(list)
   interaction_labels_of_previous_threads = set()
   for curr_thread in model.GetAllThreads():
     for event in curr_thread.async_slices:
       # TODO(nduca): Add support for page-load interaction record.
       if tir_module.IsTimelineInteractionRecord(event.name):
         interaction = tir_module.TimelineInteractionRecord.FromAsyncEvent(event)
-        # Adjust the interaction record to match the synthetic gesture
-        # controller if needed.
-        interaction = (
-            smooth_gesture_util.GetAdjustedInteractionIfContainGesture(
-                model, interaction))
         threads_to_records_map[curr_thread].append(interaction)
         if interaction.label in interaction_labels_of_previous_threads:
           raise InvalidInteractions(
-            'Interaction record label %s is duplicated on different '
-            'threads' % interaction.label)
+              'Interaction record label %s is duplicated on different '
+              'threads' % interaction.label)
     if curr_thread in threads_to_records_map:
       interaction_labels_of_previous_threads.update(
-        r.label for r in threads_to_records_map[curr_thread])
+          r.label for r in threads_to_records_map[curr_thread])
 
   return threads_to_records_map
 
@@ -127,7 +97,7 @@ class _TimelineBasedMetrics(object):
     self._all_metrics = metrics
 
   def AddResults(self, results):
-    interactions_by_label = defaultdict(list)
+    interactions_by_label = collections.defaultdict(list)
     for i in self._interaction_records:
       interactions_by_label[i.label].append(i)
 
@@ -153,11 +123,8 @@ class Options(object):
   """A class to be used to configure TimelineBasedMeasurement.
 
   This is created and returned by
-  Benchmark.CreateTimelineBasedMeasurementOptions.
+  Benchmark.CreateCoreTimelineBasedMeasurementOptions.
 
-  By default, all the timeline based metrics in telemetry/web_perf/metrics are
-  used (see _GetAllLegacyTimelineBasedMetrics above).
-  To customize your metric needs, use SetTimelineBasedMetrics().
   """
 
   def __init__(self, overhead_level=LOW_OVERHEAD_LEVEL):
@@ -193,9 +160,11 @@ class Options(object):
 
 
   def ExtendTraceCategoryFilter(self, filters):
-    category_filter = self._config.chrome_trace_config.category_filter
-    for new_category_filter in filters:
-      category_filter.AddIncludedCategory(new_category_filter)
+    for category_filter in filters:
+      self.AddTraceCategoryFilter(category_filter)
+
+  def AddTraceCategoryFilter(self, category_filter):
+    self._config.chrome_trace_config.category_filter.AddFilter(category_filter)
 
   @property
   def category_filter(self):
@@ -204,6 +173,16 @@ class Options(object):
   @property
   def config(self):
     return self._config
+
+  def ExtendTimelineBasedMetric(self, metrics):
+    for metric in metrics:
+      self.AddTimelineBasedMetric(metric)
+
+  def AddTimelineBasedMetric(self, metric):
+    assert isinstance(metric, basestring)
+    if self._timeline_based_metrics is None:
+      self._timeline_based_metrics = []
+    self._timeline_based_metrics.append(metric)
 
   def SetTimelineBasedMetrics(self, metrics):
     """Sets the new-style (TBMv2) metrics to run.
@@ -272,58 +251,83 @@ class TimelineBasedMeasurement(story_test.StoryTest):
     if not platform.tracing_controller.IsChromeTracingSupported():
       raise Exception('Not supported')
     if self._tbm_options.config.enable_chrome_trace:
-      # Always enable 'blink.console' category for:
-      # 1) Backward compat of chrome clock sync (crbug.com/646925)
+      # Always enable 'blink.console' and 'v8.console' categories for:
+      # 1) Backward compat of chrome clock sync (https://crbug.com/646925).
       # 2) Allows users to add trace event through javascript.
-      # Note that blink.console is extremely low-overhead, so this doesn't
+      # 3) For the console error metric (https://crbug.com/880432).
+      # Note that these categories are extremely low-overhead, so this doesn't
       # affect the tracing overhead budget much.
       chrome_config = self._tbm_options.config.chrome_trace_config
       chrome_config.category_filter.AddIncludedCategory('blink.console')
+      chrome_config.category_filter.AddIncludedCategory('v8.console')
     platform.tracing_controller.StartTracing(self._tbm_options.config)
 
   def Measure(self, platform, results):
     """Collect all possible metrics and added them to results."""
-    platform.tracing_controller.iteration_info = results.iteration_info
-    trace_result = platform.tracing_controller.StopTracing()
-    trace_value = trace.TraceValue(results.current_page, trace_result)
+    platform.tracing_controller.telemetry_info = results.telemetry_info
+    trace_result, _ = platform.tracing_controller.StopTracing()
+    trace_value = trace.TraceValue(
+        results.current_page, trace_result,
+        file_path=results.telemetry_info.trace_local_path,
+        remote_path=results.telemetry_info.trace_remote_path,
+        upload_bucket=results.telemetry_info.upload_bucket,
+        cloud_url=results.telemetry_info.trace_remote_url)
     results.AddValue(trace_value)
 
-    if self._tbm_options.GetTimelineBasedMetrics():
-      self._ComputeTimelineBasedMetrics(results, trace_value)
-      # Legacy metrics can be computed, but only if explicitly specified.
-      if self._tbm_options.GetLegacyTimelineBasedMetrics():
+    try:
+      if self._tbm_options.GetTimelineBasedMetrics():
+        assert not self._tbm_options.GetLegacyTimelineBasedMetrics(), (
+            'Specifying both TBMv1 and TBMv2 metrics is not allowed.')
+        self._ComputeTimelineBasedMetrics(results, trace_value)
+      else:
+        # Run all TBMv1 metrics if no other metric is specified
+        # (legacy behavior)
+        if not self._tbm_options.GetLegacyTimelineBasedMetrics():
+          raise Exception(
+              'Please specify the TBMv1 metrics you are interested in '
+              'explicitly.')
         self._ComputeLegacyTimelineBasedMetrics(results, trace_result)
-    else:
-      # Run all TBMv1 metrics if no other metric is specified (legacy behavior)
-      if not self._tbm_options.GetLegacyTimelineBasedMetrics():
-        logging.warn('Please specify the TBMv1 metrics you are interested in '
-                     'explicitly. This implicit functionality will be removed '
-                     'on July 17, 2016.')
-        self._tbm_options.SetLegacyTimelineBasedMetrics(
-            _GetAllLegacyTimelineBasedMetrics())
-      self._ComputeLegacyTimelineBasedMetrics(results, trace_result)
+    finally:
+      trace_result.CleanUpAllTraces()
 
-  def DidRunStory(self, platform):
+  def DidRunStory(self, platform, results):
     """Clean up after running the story."""
     if platform.tracing_controller.is_tracing_running:
-      platform.tracing_controller.StopTracing()
+      trace_result, _ = platform.tracing_controller.StopTracing()
+      trace_value = trace.TraceValue(
+          results.current_page, trace_result,
+          file_path=results.telemetry_info.trace_local_path,
+          remote_path=results.telemetry_info.trace_remote_path,
+          upload_bucket=results.telemetry_info.upload_bucket,
+          cloud_url=results.telemetry_info.trace_remote_url)
+      results.AddValue(trace_value)
 
   def _ComputeTimelineBasedMetrics(self, results, trace_value):
     metrics = self._tbm_options.GetTimelineBasedMetrics()
     extra_import_options = {
-      'trackDetailedModelStats': True
+        'trackDetailedModelStats': True
     }
+    trace_size_in_mib = os.path.getsize(trace_value.filename) / (2 ** 20)
+    # Bails out on trace that are too big. See crbug.com/812631 for more
+    # details.
+    if trace_size_in_mib > 400:
+      results.Fail('Trace size is too big: %s MiB' % trace_size_in_mib)
+      return
 
+    logging.info('Starting to compute metrics on trace')
+    start = time.time()
     mre_result = metric_runner.RunMetric(
-        trace_value.filename, metrics, extra_import_options)
+        trace_value.filename, metrics, extra_import_options,
+        report_progress=False, canonical_url=results.telemetry_info.trace_url)
+    logging.info('Processing resulting traces took %.3f seconds' % (
+        time.time() - start))
     page = results.current_page
 
-    failure_dicts = mre_result.failures
-    for d in failure_dicts:
-      results.AddValue(
-          common_value_helpers.TranslateMreFailure(d, page))
+    for f in mre_result.failures:
+      results.Fail(f.stack)
 
-    results.value_set.extend(mre_result.pairs.get('histograms', []))
+    histogram_dicts = mre_result.pairs.get('histograms', [])
+    results.ImportHistogramDicts(histogram_dicts)
 
     for d in mre_result.pairs.get('scalars', []):
       results.AddValue(common_value_helpers.TranslateScalarValue(d, page))
@@ -350,3 +354,7 @@ class TimelineBasedMeasurement(story_test.StoryTest):
 
     for metric in all_metrics:
       metric.AddWholeTraceResults(model, results)
+
+  @property
+  def tbm_options(self):
+    return self._tbm_options

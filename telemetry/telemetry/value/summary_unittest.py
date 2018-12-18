@@ -9,7 +9,6 @@ import unittest
 from telemetry import story
 from telemetry.internal.results import page_test_results
 from telemetry import page as page_module
-from telemetry.value import failure
 from telemetry.value import histogram
 from telemetry.value import improvement_direction
 from telemetry.value import list_of_scalar_values
@@ -21,24 +20,33 @@ class TestBase(unittest.TestCase):
   def setUp(self):
     story_set = story.StorySet(base_dir=os.path.dirname(__file__))
     story_set.AddStory(
-        page_module.Page('http://www.bar.com/', story_set, story_set.base_dir))
+        page_module.Page('http://www.bar.com/', story_set, story_set.base_dir,
+                         name='http://www.bar.com/'))
     story_set.AddStory(
-        page_module.Page('http://www.baz.com/', story_set, story_set.base_dir))
+        page_module.Page('http://www.baz.com/', story_set, story_set.base_dir,
+                         name='http://www.baz.com/'))
     story_set.AddStory(
-        page_module.Page('http://www.foo.com/', story_set, story_set.base_dir))
+        page_module.Page('http://www.foo.com/', story_set, story_set.base_dir,
+                         name='http://www.foo.com/'))
     self.story_set = story_set
 
   @property
   def pages(self):
     return self.story_set.stories
 
+  def getPageTestResults(self):
+    results = page_test_results.PageTestResults()
+    results.telemetry_info.benchmark_name = 'benchmark'
+    results.telemetry_info.benchmark_start_epoch = 123
+    results.telemetry_info.benchmark_descriptions = 'foo'
+    return results
 
 class SummaryTest(TestBase):
   def testBasicSummary(self):
     page0 = self.pages[0]
     page1 = self.pages[1]
 
-    results = page_test_results.PageTestResults()
+    results = self.getPageTestResults()
 
     results.WillRunPage(page0)
     v0 = scalar.ScalarValue(page0, 'a', 'seconds', 3,
@@ -52,7 +60,7 @@ class SummaryTest(TestBase):
     results.AddValue(v1)
     results.DidRunPage(page1)
 
-    summary = summary_module.Summary(results.all_page_specific_values)
+    summary = summary_module.Summary(results)
     values = summary.interleaved_computed_per_page_values_and_summaries
 
     v0_list = list_of_scalar_values.ListOfScalarValues(
@@ -74,7 +82,7 @@ class SummaryTest(TestBase):
   def testBasicSummaryWithOnlyOnePage(self):
     page0 = self.pages[0]
 
-    results = page_test_results.PageTestResults()
+    results = self.getPageTestResults()
 
     results.WillRunPage(page0)
     v0 = scalar.ScalarValue(page0, 'a', 'seconds', 3,
@@ -82,7 +90,7 @@ class SummaryTest(TestBase):
     results.AddValue(v0)
     results.DidRunPage(page0)
 
-    summary = summary_module.Summary(results.all_page_specific_values)
+    summary = summary_module.Summary(results)
     values = summary.interleaved_computed_per_page_values_and_summaries
 
     v0_list = list_of_scalar_values.ListOfScalarValues(
@@ -101,7 +109,7 @@ class SummaryTest(TestBase):
     page1 = self.pages[1]
     page2 = self.pages[2]
 
-    results = page_test_results.PageTestResults()
+    results = self.getPageTestResults()
     results.WillRunPage(page0)
     v0 = scalar.ScalarValue(page0, 'a', 'seconds', 3,
                             improvement_direction=improvement_direction.UP)
@@ -127,7 +135,7 @@ class SummaryTest(TestBase):
     # Note, page[2] does not report a 'b' metric.
     results.DidRunPage(page2)
 
-    summary = summary_module.Summary(results.all_page_specific_values)
+    summary = summary_module.Summary(results)
     values = summary.interleaved_computed_per_page_values_and_summaries
 
     v0_list = list_of_scalar_values.ListOfScalarValues(
@@ -167,13 +175,12 @@ class SummaryTest(TestBase):
     page0 = self.pages[0]
     page1 = self.pages[1]
 
-    results = page_test_results.PageTestResults()
+    results = self.getPageTestResults()
     results.WillRunPage(page0)
     v0 = scalar.ScalarValue(page0, 'a', 'seconds', 3,
                             improvement_direction=improvement_direction.UP)
     results.AddValue(v0)
-    v1 = failure.FailureValue.FromMessage(page0, 'message')
-    results.AddValue(v1)
+    results.Fail('message')
     results.DidRunPage(page0)
 
     results.WillRunPage(page1)
@@ -182,7 +189,7 @@ class SummaryTest(TestBase):
     results.AddValue(v2)
     results.DidRunPage(page1)
 
-    summary = summary_module.Summary(results.all_page_specific_values)
+    summary = summary_module.Summary(results)
     values = summary.interleaved_computed_per_page_values_and_summaries
 
     v0_list = list_of_scalar_values.ListOfScalarValues(
@@ -201,7 +208,7 @@ class SummaryTest(TestBase):
     page0 = self.pages[0]
     page1 = self.pages[1]
 
-    results = page_test_results.PageTestResults()
+    results = self.getPageTestResults()
     results.WillRunPage(page0)
     v0 = scalar.ScalarValue(page0, 'a', 'seconds', 3,
                             improvement_direction=improvement_direction.UP)
@@ -212,8 +219,7 @@ class SummaryTest(TestBase):
     v1 = scalar.ScalarValue(page1, 'a', 'seconds', 7,
                             improvement_direction=improvement_direction.UP)
     results.AddValue(v1)
-    v2 = failure.FailureValue.FromMessage(page1, 'message')
-    results.AddValue(v2)
+    results.Fail('message')
     results.DidRunPage(page1)
 
     results.WillRunPage(page0)
@@ -228,7 +234,7 @@ class SummaryTest(TestBase):
     results.AddValue(v4)
     results.DidRunPage(page1)
 
-    summary = summary_module.Summary(results.all_page_specific_values)
+    summary = summary_module.Summary(results)
     values = summary.interleaved_computed_per_page_values_and_summaries
 
     page0_aggregated = list_of_scalar_values.ListOfScalarValues(
@@ -246,7 +252,7 @@ class SummaryTest(TestBase):
     page0 = self.pages[0]
     page1 = self.pages[1]
 
-    results = page_test_results.PageTestResults()
+    results = self.getPageTestResults()
     results.WillRunPage(page0)
     v0 = scalar.ScalarValue(page0, 'a', 'seconds', 3,
                             improvement_direction=improvement_direction.UP)
@@ -271,7 +277,7 @@ class SummaryTest(TestBase):
     results.AddValue(v3)
     results.DidRunPage(page1)
 
-    summary = summary_module.Summary(results.all_page_specific_values)
+    summary = summary_module.Summary(results)
     values = summary.interleaved_computed_per_page_values_and_summaries
 
     page0_aggregated = list_of_scalar_values.ListOfScalarValues(
@@ -293,7 +299,7 @@ class SummaryTest(TestBase):
   def testPageRunsTwice(self):
     page0 = self.pages[0]
 
-    results = page_test_results.PageTestResults()
+    results = self.getPageTestResults()
 
     results.WillRunPage(page0)
     v0 = scalar.ScalarValue(page0, 'b', 'seconds', 2,
@@ -307,7 +313,7 @@ class SummaryTest(TestBase):
     results.AddValue(v1)
     results.DidRunPage(page0)
 
-    summary = summary_module.Summary(results.all_page_specific_values)
+    summary = summary_module.Summary(results)
     values = summary.interleaved_computed_per_page_values_and_summaries
 
     page0_aggregated = list_of_scalar_values.ListOfScalarValues(
@@ -325,7 +331,7 @@ class SummaryTest(TestBase):
     page0 = self.pages[0]
     page1 = self.pages[1]
 
-    results = page_test_results.PageTestResults()
+    results = self.getPageTestResults()
 
     results.WillRunPage(page0)
     v0 = list_of_scalar_values.ListOfScalarValues(
@@ -341,7 +347,7 @@ class SummaryTest(TestBase):
     results.AddValue(v1)
     results.DidRunPage(page1)
 
-    summary = summary_module.Summary(results.all_page_specific_values)
+    summary = summary_module.Summary(results)
     values = summary.interleaved_computed_per_page_values_and_summaries
 
     b_summary = list_of_scalar_values.ListOfScalarValues(
@@ -357,7 +363,7 @@ class SummaryTest(TestBase):
     page0 = self.pages[0]
     page1 = self.pages[1]
 
-    results = page_test_results.PageTestResults()
+    results = self.getPageTestResults()
     results.WillRunPage(page0)
     v0 = histogram.HistogramValue(
         page0, 'a', 'units',
@@ -374,7 +380,7 @@ class SummaryTest(TestBase):
     results.AddValue(v1)
     results.DidRunPage(page1)
 
-    summary = summary_module.Summary(results.all_page_specific_values)
+    summary = summary_module.Summary(results)
     values = summary.interleaved_computed_per_page_values_and_summaries
 
     self.assertEquals(2, len(values))
@@ -385,7 +391,7 @@ class SummaryTest(TestBase):
     page0 = self.pages[0]
     page1 = self.pages[1]
 
-    results = page_test_results.PageTestResults()
+    results = self.getPageTestResults()
 
     results.WillRunPage(page0)
     v0 = scalar.ScalarValue(page0, 'a', 'seconds', 20,
@@ -408,8 +414,7 @@ class SummaryTest(TestBase):
     results.DidRunPage(page1)
 
     summary = summary_module.Summary(
-        results.all_page_specific_values,
-        key_func=lambda v: True)
+        results, key_func=lambda v: True)
     values = summary.interleaved_computed_per_page_values_and_summaries
 
     v0_list = list_of_scalar_values.ListOfScalarValues(

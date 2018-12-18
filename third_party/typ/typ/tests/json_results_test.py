@@ -32,7 +32,7 @@ class TestMakeUploadRequest(unittest.TestCase):
             'multipart/form-data; '
             'boundary=-J-S-O-N-R-E-S-U-L-T-S---B-O-U-N-D-A-R-Y-')
 
-        self.assertEqual(url, 'http://localhost/testfile/upload')
+        self.assertEqual(url, 'https://localhost/testfile/upload')
         self.assertMultiLineEqual(
             data,
             ('---J-S-O-N-R-E-S-U-L-T-S---B-O-U-N-D-A-R-Y-\r\n'
@@ -55,6 +55,7 @@ class TestMakeUploadRequest(unittest.TestCase):
              '{"version": 3, "interrupted": false, "path_delimiter": ".", '
              '"seconds_since_epoch": 0, '
              '"num_failures_by_type": {"FAIL": 0, "PASS": 0, "SKIP": 0}, '
+             '"num_regressions": 0, '
              '"tests": {}}\r\n'
              '---J-S-O-N-R-E-S-U-L-T-S---B-O-U-N-D-A-R-Y---\r\n'))
 
@@ -70,14 +71,16 @@ class TestMakeFullResults(unittest.TestCase):
         result_set = json_results.ResultSet()
         result_set.add(
             json_results.Result('foo_test.FooTest.test_fail',
-                                json_results.ResultType.Failure, 0, 0, 0,
+                                json_results.ResultType.Failure, 0, 0.1, 0,
                                 unexpected=True))
         result_set.add(json_results.Result('foo_test.FooTest.test_pass',
                                            json_results.ResultType.Pass,
-                                           0, 0, 0))
+                                           0, 0.2, 0))
         result_set.add(json_results.Result('foo_test.FooTest.test_skip',
                                            json_results.ResultType.Skip,
-                                           0, 0, 0, unexpected=False))
+                                           0, 0.3, 0, 
+                                           expected=[json_results.ResultType.Skip],
+                                           unexpected=False))
 
         full_results = json_results.make_full_results(
             ['foo=bar'], 0, test_names, result_set)
@@ -88,6 +91,7 @@ class TestMakeFullResults(unittest.TestCase):
                 'FAIL': 1,
                 'PASS': 1,
                 'SKIP': 1},
+            'num_regressions': 1,
             'path_delimiter': '.',
             'seconds_since_epoch': 0,
             'tests': {
@@ -96,12 +100,19 @@ class TestMakeFullResults(unittest.TestCase):
                         'test_fail': {
                             'expected': 'PASS',
                             'actual': 'FAIL',
-                            'is_unexpected': True},
+                            'times': [0.1],
+                            'is_unexpected': True,
+                            'is_regression': True,
+                        },
                         'test_pass': {
                             'expected': 'PASS',
-                            'actual': 'PASS'},
+                            'actual': 'PASS',
+                            'times': [0.2],
+                        },
                         'test_skip': {
                             'expected': 'SKIP',
-                            'actual': 'SKIP'}}}},
+                            'actual': 'SKIP',
+                            'times': [0.3],
+                        }}}},
             'version': 3}
         self.assertEqual(full_results, expected_full_results)

@@ -31,8 +31,7 @@ var SourceEntry = (function() {
   SourceEntry.prototype = {
     update: function(logEntry) {
       // Only the last event should have the same type first event,
-      if (!this.isInactive_ &&
-          logEntry.phase == EventPhase.PHASE_END &&
+      if (!this.isInactive_ && logEntry.phase == EventPhase.PHASE_END &&
           logEntry.type == this.entries_[0].type) {
         this.isInactive_ = true;
       }
@@ -79,12 +78,16 @@ var SourceEntry = (function() {
 
       switch (e.source.type) {
         case EventSourceType.URL_REQUEST:
-        // TODO(ricea): Remove SOCKET_STREAM after M41 is released.
-        case EventSourceType.SOCKET_STREAM:
         case EventSourceType.HTTP_STREAM_JOB:
+        case EventSourceType.HTTP_STREAM_JOB_CONTROLLER:
+        case EventSourceType.BIDIRECTIONAL_STREAM:
           this.description_ = e.params.url;
           break;
-        case EventSourceType.CONNECT_JOB:
+        case EventSourceType.TRANSPORT_CONNECT_JOB:
+        case EventSourceType.SSL_CONNECT_JOB:
+        case EventSourceType.SOCKS_CONNECT_JOB:
+        case EventSourceType.HTTP_PROXY_CONNECT_JOB:
+        case EventSourceType.WEB_SOCKET_TRANSPORT_CONNECT_JOB:
           this.description_ = e.params.group_name;
           break;
         case EventSourceType.HOST_RESOLVER_IMPL_JOB:
@@ -152,16 +155,6 @@ var SourceEntry = (function() {
               break;
           }
           break;
-        case EventSourceType.FILESTREAM:
-          this.description_ = e.params.file_name;
-          break;
-        case EventSourceType.IPV6_PROBE_JOB:
-          if (e.type == EventType.IPV6_PROBE_RUNNING &&
-              e.phase == EventPhase.PHASE_END) {
-            this.description_ = e.params.ipv6_supported ? 'IPv6 Supported' :
-                                                          'IPv6 Not Supported';
-          }
-          break;
       }
 
       if (this.description_ == undefined)
@@ -180,8 +173,10 @@ var SourceEntry = (function() {
     /**
      * Returns the starting entry for this source. Conceptually this is the
      * first entry that was logged to this source. However, we skip over the
-     * TYPE_REQUEST_ALIVE entries which wrap TYPE_URL_REQUEST_START_JOB
-     * entries.
+     * TYPE_REQUEST_ALIVE entries without parameters which wrap
+     * TYPE_URL_REQUEST_START_JOB entries.  (TYPE_REQUEST_ALIVE may or may not
+     * have parameters depending on what version of Chromium they were
+     * generated from.)
      */
     getStartEntry_: function() {
       if (this.entries_.length < 1)
@@ -193,8 +188,7 @@ var SourceEntry = (function() {
       }
       if (this.entries_[0].source.type == EventSourceType.DOWNLOAD) {
         // If any rename occurred, use the last name
-        e = this.findLastLogEntryStartByType_(
-            EventType.DOWNLOAD_FILE_RENAMED);
+        e = this.findLastLogEntryStartByType_(EventType.DOWNLOAD_FILE_RENAMED);
         if (e != undefined)
           return e;
         // Otherwise, if the file was opened, use that name
@@ -207,27 +201,8 @@ var SourceEntry = (function() {
           return e;
       }
       if (this.entries_.length >= 2) {
-        // Needed for compatability with log dumps prior to M26.
-        // TODO(mmenke):  Remove this.
-        if (this.entries_[0].type == EventType.SOCKET_POOL_CONNECT_JOB &&
-            this.entries_[0].params == undefined) {
-          return this.entries_[1];
-        }
         if (this.entries_[1].type == EventType.UDP_CONNECT)
           return this.entries_[1];
-        if (this.entries_[0].type == EventType.REQUEST_ALIVE &&
-            this.entries_[0].params == undefined) {
-          var startIndex = 1;
-          // Skip over delegate events for URL_REQUESTs.
-          for (; startIndex + 1 < this.entries_.length; ++startIndex) {
-            var type = this.entries_[startIndex].type;
-            if (type != EventType.URL_REQUEST_DELEGATE &&
-                type != EventType.DELEGATE_INFO) {
-              break;
-            }
-          }
-          return this.entries_[startIndex];
-        }
         if (this.entries_[1].type == EventType.IPV6_PROBE_RUNNING)
           return this.entries_[1];
       }
@@ -338,9 +313,9 @@ var SourceEntry = (function() {
     createTablePrinter: function() {
       return createLogEntryTablePrinter(
           this.entries_,
-          SourceTracker.getInstance().getPrivacyStripping(),
           SourceTracker.getInstance().getUseRelativeTimes() ?
-              timeutil.getBaseTime() : 0,
+              timeutil.getBaseTime() :
+              0,
           Constants.clientInfo.numericDate);
     },
   };

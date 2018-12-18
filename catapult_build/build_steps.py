@@ -24,16 +24,6 @@ import sys
 # github.com/luci/recipes-py/blob/master/recipe_modules/generator_script/api.py
 _CATAPULT_TESTS = [
     {
-        'name': 'BattOr Smoke Tests',
-        'path': 'common/battor/battor/battor_wrapper_devicetest.py',
-        'disabled': ['android'],
-    },
-    {
-        'name': 'BattOr Unit Tests',
-        'path': 'common/battor/bin/run_py_tests',
-        'disabled': ['android'],
-    },
-    {
         'name': 'Build Python Tests',
         'path': 'catapult_build/bin/run_py_tests',
         'disabled': ['android'],
@@ -72,6 +62,11 @@ _CATAPULT_TESTS = [
         'disabled': ['android'],
     },
     {
+        'name': 'Dashboard WCT Tests',
+        'path': 'dashboard/bin/run_wct_tests',
+        'disabled': ['android', 'win', 'mac'],
+    },
+    {
         'name': 'Dependency Manager Tests',
         'path': 'dependency_manager/bin/run_tests',
     },
@@ -86,13 +81,18 @@ _CATAPULT_TESTS = [
         'disabled': ['mac', 'win'],
     },
     {
-        'name': 'Node Smoke Test',
-        'path': 'common/node_runner/bin/test_node_for_smoke',
+        'name': 'eslint Tests',
+        'path': 'common/eslint/bin/run_tests',
+        'disabled': ['android'],
+    },
+    {
+        'name': 'Native Heap Symbolizer Tests',
+        'path': 'tracing/bin/run_symbolizer_tests',
         'disabled': ['android'],
     },
     {
         'name': 'Py-vulcanize Tests',
-        'path': 'third_party/py_vulcanize/bin/run_py_tests',
+        'path': 'common/py_vulcanize/bin/run_py_tests',
         'additional_args': ['--no-install-hooks'],
         'disabled': ['android'],
     },
@@ -101,14 +101,38 @@ _CATAPULT_TESTS = [
         'path': 'systrace/bin/run_tests',
     },
     {
-        'name': 'Telemetry Tests with Stable Browser',
-        'path': 'telemetry/bin/run_tests',
+        'name': 'Snap-it Tests',
+        'path': 'telemetry/bin/run_snap_it_unittest',
+        'additional_args': [
+            '--browser=reference',
+        ],
+        'uses_sandbox_env': True,
+        'disabled': ['android'],
+    },
+    {
+        'name': 'Soundwave Tests',
+        'path': 'experimental/soundwave/bin/run_tests',
+    },
+    {
+        'name': 'Telemetry Tests with Stable Browser (Desktop)',
+        'path': 'catapult_build/fetch_telemetry_deps_and_run_tests',
         'additional_args': [
             '--browser=reference',
             '--start-xvfb'
         ],
         'uses_sandbox_env': True,
         'disabled': ['android'],
+    },
+    {
+        'name': 'Telemetry Tests with Stable Browser (Android)',
+        'path': 'catapult_build/fetch_telemetry_deps_and_run_tests',
+        'additional_args': [
+            '--browser=reference',
+            '--device=android',
+            '--jobs=1'
+        ],
+        'uses_sandbox_env': True,
+        'disabled': ['win', 'mac', 'linux']
     },
     {
         'name': 'Telemetry Integration Tests with Stable Browser',
@@ -154,6 +178,14 @@ _CATAPULT_TESTS = [
         'disabled': ['android'],
     },
     {
+        'name': 'Typ unittest',
+        'path': 'third_party/typ/run',
+        'additional_args': ['tests'],
+        'disabled': [
+            'android',
+            'win'],  # TODO(crbug.com/851498): enable typ unittests on Win
+    },
+    {
         'name': 'Vinn Tests',
         'path': 'third_party/vinn/bin/run_tests',
         'disabled': ['android'],
@@ -169,6 +201,8 @@ _CATAPULT_TESTS = [
     },
 ]
 
+_STALE_FILE_TYPES = ['.pyc', '.pseudo_lock']
+
 
 def main(args=None):
   """Send list of test to run to recipes generator_script.
@@ -180,19 +214,20 @@ def main(args=None):
   parser.add_argument('--api-path-checkout', help='Path to catapult checkout')
   parser.add_argument('--app-engine-sdk-pythonpath',
                       help='PYTHONPATH to include app engine SDK path')
+  parser.add_argument('--wct-path', help='Path to infra/testing/wct binary')
   parser.add_argument('--platform',
                       help='Platform name (linux, mac, or win)')
   parser.add_argument('--output-json', help='Output for buildbot status page')
   args = parser.parse_args(args)
 
   steps = [{
-      # Always remove stale pyc files first. Not listed as a test above
+      # Always remove stale files first. Not listed as a test above
       # because it is a step and not a test, and must be first.
-      'name': 'Remove Stale PYC files',
+      'name': 'Remove Stale files',
       'cmd': ['python',
               os.path.join(args.api_path_checkout,
-                           'catapult_build', 'remove_stale_pyc_files.py'),
-              args.api_path_checkout]
+                           'catapult_build', 'remove_stale_files.py'),
+              args.api_path_checkout, ','.join(_STALE_FILE_TYPES)]
   }]
   if args.platform == 'android':
     # On Android, we need to prepare the devices a bit before using them in
@@ -226,7 +261,15 @@ def main(args=None):
         'name': test['name'],
         'env': {}
     }
-    step['cmd'] = ['python', os.path.join(args.api_path_checkout, test['path'])]
+
+    # vpython doesn't integrate well with app engine SDK yet
+    if test.get('uses_app_engine_sdk'):
+      executable = 'python'
+    else:
+      executable = 'vpython.bat' if sys.platform == 'win32' else 'vpython'
+
+    step['cmd'] = [
+        executable, os.path.join(args.api_path_checkout, test['path'])]
     if step['name'] == 'Systrace Tests':
       step['cmd'] += ['--device=' + args.platform]
     if test.get('additional_args'):

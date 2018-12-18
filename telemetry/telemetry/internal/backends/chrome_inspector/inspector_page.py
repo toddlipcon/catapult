@@ -28,7 +28,7 @@ class InspectorPage(object):
   def _OnNotification(self, msg):
     if msg['method'] == 'Page.frameNavigated':
       url = msg['params']['frame']['url']
-      if not self._navigated_frame_ids == None:
+      if not self._navigated_frame_ids is None:
         frame_id = msg['params']['frame']['id']
         if self._navigation_frame_id == frame_id:
           self._navigation_frame_id = ''
@@ -40,8 +40,8 @@ class InspectorPage(object):
         # TODO(tonyg): Remove this when Chrome 38 goes stable.
         self._navigation_url = ''
         self._navigation_pending = False
-      elif (not url == 'chrome://newtab/' and not url == 'about:blank'
-        and not 'parentId' in msg['params']['frame']):
+      elif (not url == 'chrome://newtab/' and not url == 'about:blank' and
+            not 'parentId' in msg['params']['frame']):
         # Marks the navigation as complete and unblocks the
         # WaitForNavigate call.
         self._navigation_pending = False
@@ -138,7 +138,14 @@ class InspectorPage(object):
 
   def CaptureScreenshot(self, timeout=60):
     request = {
-        'method': 'Page.captureScreenshot'
+        'method': 'Page.captureScreenshot',
+        'params': {
+            # TODO(rmistry): when Chrome is running in headless mode, this
+            # will need to pass True. Telemetry needs to understand
+            # whether the browser is in headless mode, and pass that
+            # knowledge down to this method.
+            'fromSurface': False
+            }
         }
     # "Google API are missing..." infobar might cause a viewport resize
     # which invalidates screenshot request. See crbug.com/459820.

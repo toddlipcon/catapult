@@ -48,23 +48,23 @@ an alert from an issue on the issue tracker.
       /**
        * Sends a request to /edit_anomalies to reset the bug ID of this alert.
        */
-      onRemoveBug: function(event, detail) {
+      onRemoveBug(event, detail) {
         event.preventDefault();
         this.loading = true;
-        var params = {
+        const params = {
           'keys': this.key,
           'bug_id': 'REMOVE',
-          xsrf_token: this.xsrfToken
+          'xsrf_token': this.xsrfToken
         };
         simple_xhr.send('/edit_anomalies', params,
-          function(info) {
-            this.loading = false;
-            this.fire('untriaged', {'key': this.key});
-          }.bind(this),
-          function(msg) {
-            this.loading = false;
-            alert(msg);
-          }.bind(this)
+            function(info) {
+              this.loading = false;
+              this.fire('untriaged', {'key': this.key});
+            }.bind(this),
+            function(msg) {
+              this.loading = false;
+              alert(msg);
+            }.bind(this)
         );
       }
     });

@@ -18,12 +18,12 @@ import os
 import sys
 import textwrap
 
-
 from typ import main
 from typ import test_case
 from typ import Host
 from typ import VERSION
 from typ.fakes import test_result_server_fake
+from typ.fakes import host_fake
 
 
 is_python3 = bool(sys.version_info.major == 3)
@@ -37,8 +37,13 @@ d = textwrap.dedent
 
 PASS_TEST_PY = """
 import unittest
+import time
+
 class PassingTest(unittest.TestCase):
     def test_pass(self):
+        # Add sleep to make the time assertion in
+        # main_test.TestCli.test_write_full_results_to not flaky.
+        time.sleep(0.1)
         pass
 """
 
@@ -141,16 +146,21 @@ SF_TEST_FILES = {'sf_test.py': SF_TEST_PY}
 
 LOAD_TEST_PY = """
 import unittest
+
+
+class BaseTest(unittest.TestCase):
+    pass
+
+
+def method_fail(self):
+    self.fail()
+
+
+def method_pass(self):
+    pass
+
+
 def load_tests(_, _2, _3):
-    class BaseTest(unittest.TestCase):
-        pass
-
-    def method_fail(self):
-        self.fail()
-
-    def method_pass(self):
-        pass
-
     setattr(BaseTest, "test_fail", method_fail)
     setattr(BaseTest, "test_pass", method_pass)
     suite = unittest.TestSuite()
@@ -162,82 +172,6 @@ def load_tests(_, _2, _3):
 LOAD_TEST_FILES = {'load_test.py': LOAD_TEST_PY}
 
 
-MIXED_TEST_PY = """
-import unittest
-class SampleTest(unittest.TestCase):
-
-  def test_pass_0(self):
-    self.assertEqual(1, 1)
-
-  def test_pass_1(self):
-    self.assertEqual(1, 1)
-
-  def test_fail_0(self):
-    self.assertEqual(1, 2)
-
-  def test_fail_1(self):
-    raise Exception()
-
-  @unittest.skip('Skip for no reason')
-  def test_skip_0(self):
-    pass
-"""
-
-
-LOAD_MANY_TEST_PY = """
-import unittest
-
-def generate_test_case(test_method_name, test_type):
-  class GeneratedTest(unittest.TestCase):
-    pass
-
-  if test_type == 'pass':
-    def test_method(self):
-      self.assertEqual(1, 1)
-  elif test_type == 'fail':
-    def test_method(self):
-      self.assertEqual(1, 2)
-  elif test_type == 'skip':
-    def test_method(self):
-      self.skipTest('Skipped')
-  else:
-    raise Exception
-
-  setattr(GeneratedTest, test_method_name, test_method)
-  return GeneratedTest(test_method_name)
-
-
-def load_tests(loader, standard_tests, pattern):
-  del loader, standard_tests, pattern  # unused
-
-  suite = unittest.TestSuite()
-
-  passed_test_names = [
-    str('test_pass_%s' % i) for i in range(2, 15)]
-
-  failed_test_names = [
-    str('test_fail_%s' % i) for i in range(2, 10)]
-
-  skipped_test_names = [
-    str('test_skip_%s' % i) for i in range(1, 10)]
-
-  for test_method_name in passed_test_names:
-    suite.addTest(generate_test_case(test_method_name, 'pass'))
-
-  for test_method_name in failed_test_names:
-    suite.addTest(generate_test_case(test_method_name, 'fail'))
-
-  for test_method_name in skipped_test_names:
-    suite.addTest(generate_test_case(test_method_name, 'skip'))
-
-  return suite
-"""
-
-
-MANY_TEST_FILES = {
-    'mixed_test.py': MIXED_TEST_PY,         # 2 passes, 2 fails, 1 skip
-    'load_many_test.py': LOAD_MANY_TEST_PY} # 13 passes, 13 fails, 9 skips
-
 
 path_to_main = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -247,34 +181,6 @@ path_to_main = os.path.join(
 class TestCli(test_case.MainTestCase):
     prog = [sys.executable, path_to_main]
     files_to_ignore = ['*.pyc']
-
-    def get_test_results_stat(self, test_output):
-      num_passes = test_output.count(' passed\n')
-      num_fails =  test_output.count(' failed unexpectedly:\n')
-      num_skips = test_output.count(' was skipped\n')
-      return num_passes, num_fails, num_skips
-
-    def run_and_check_test_results(self, num_shards):
-      total_passes, total_fails, total_skips = 0, 0, 0
-      min_num_tests_run = float('inf')
-      max_num_tests_run = 0
-      for shard_index in range(num_shards):
-        _, out, _, _ = self.check(
-            ['--total-shards', str(num_shards), '--shard-index',
-             str(shard_index)], files=MANY_TEST_FILES)
-        passes, fails, skips = self.get_test_results_stat(out)
-        total_passes += passes
-        total_fails += fails
-        total_skips += skips
-        num_tests_run = passes + fails
-        min_num_tests_run = min(min_num_tests_run, num_tests_run)
-        max_num_tests_run = max(max_num_tests_run, num_tests_run)
-      self.assertEqual(total_passes, 15)
-      self.assertEqual(total_fails, 10)
-      self.assertEqual(total_skips, 10)
-
-      # Make sure that we don't distribute the tests too unevenly.
-      self.assertLessEqual(max_num_tests_run - min_num_tests_run, 2)
 
     def test_bad_arg(self):
         self.check(['--bad-arg'], ret=2, out='',
@@ -291,7 +197,7 @@ class TestCli(test_case.MainTestCase):
         self.check([], files=PASS_TEST_FILES,
                    ret=0,
                    out=('[1/1] pass_test.PassingTest.test_pass passed\n'
-                        '1 test run, 0 failures.\n'), err='')
+                        '1 test passed, 0 skipped, 0 failures.\n'), err='')
 
     def test_coverage(self):
         try:
@@ -303,20 +209,20 @@ class TestCli(test_case.MainTestCase):
             self.check(['-c', 'pass_test'], files=files, ret=0, err='',
                        out=d("""\
                              [1/1] pass_test.PassingTest.test_pass passed
-                             1 test run, 0 failures.
+                             1 test passed, 0 skipped, 0 failures.
 
-                             Name        Stmts   Miss  Cover
-                             -------------------------------
-                             fail_test       4      4     0%
-                             pass_test       4      0   100%
-                             -------------------------------
-                             TOTAL           8      4    50%
+                             Name           Stmts   Miss  Cover
+                             ----------------------------------
+                             fail_test.py       4      4     0%
+                             pass_test.py       6      0   100%
+                             ----------------------------------
+                             TOTAL             10      4    60%
                              """))
         except ImportError:  # pragma: no cover
             # We can never cover this line, since running coverage means
             # that import will succeed.
             self.check(['-c'], files=PASS_TEST_FILES, ret=1,
-                       out='Error: coverage is not installed\n', err='')
+                       out='Error: coverage is not installed.\n', err='')
 
     def test_debugger(self):
         if sys.version_info.major == 3:  # pragma: python3
@@ -330,7 +236,7 @@ class TestCli(test_case.MainTestCase):
         self.check(['-n'], files=PASS_TEST_FILES, ret=0, err='',
                    out=d("""\
                          [1/1] pass_test.PassingTest.test_pass passed
-                         1 test run, 0 failures.
+                         1 test passed, 0 skipped, 0 failures.
                          """))
 
     def test_error(self):
@@ -343,12 +249,87 @@ class TestCli(test_case.MainTestCase):
         _, out, _, _ = self.check([''], files=files, ret=1, err='')
         self.assertIn('[1/1] err_test.ErrTest.test_err failed unexpectedly',
                       out)
-        self.assertIn('1 test run, 1 failure', out)
+        self.assertIn('0 tests passed, 0 skipped, 1 failure', out)
+
+    def test_pass_repeat(self):
+        self.check(
+            ['--repeat', '2'], files=PASS_TEST_FILES, ret=0, err='',
+            out=d("""\
+                  [1/2] pass_test.PassingTest.test_pass passed
+                  [2/2] pass_test.PassingTest.test_pass passed
+                  1 test passed, 0 skipped, 0 failures.
+                  """))
+
+    def test_expectations(self):
+        files = {
+            'expectations.txt': d('''\
+                # tags: [ foo bar ]
+                crbug.com/12345 [ foo ] fail_test.FailingTest.test_fail [ Failure ]
+                '''),
+            'fail_test.py': FAIL_TEST_PY,
+        }
+
+        # No tags are passed, so this should fail unexpectedly.
+        #_, out, _, _ = self.check(['-X', 'expectations.txt'],
+        #                          files=files, ret=1)
+
+        # A matching tag is passed, so the test should fail as expected.
+        self.check(['-X', 'expectations.txt', '-x', 'foo'], files=files, ret=0)
+
+        # A tag that doesn't match is passed, so the test should fail
+        # unexpectedly.
+        self.check(['-X', 'expectations.txt', '-x', 'bar'], files=files, ret=1)
+
+        # Passing a tag without an expectations file doesn't make sense.
+        self.check(['-x', 'bar'], files=files, ret=1)
+
+    def test_expectations_with_globs(self):
+        files = {
+            'expectations.txt': d('''\
+                crbug.com/12345 fail_test.FailingTest.* [ Failure ]
+                '''),
+            'fail_test.py': FAIL_TEST_PY,
+        }
+        self.check(['-X', 'expectations.txt'], files=files, ret=0)
+
+    def test_multiple_expectations_files_do_not_work(self):
+        files = {
+            'expectations_1.txt': d('''\
+                # tags: [ foo bar ]
+                crbug.com/12345 [ foo ] fail_test.FailingTest.test_fail [ Failure ]
+                '''),
+            'expectations_2.txt': d('''\
+                # tags: [ foo bar ]
+                crbug.com/12345 [ foo ] fail_test.FailingTest.test_skip [ Skip ]
+                '''),
+            'fail_test.py': FAIL_TEST_PY,
+        }
+        # This isn't supported yet.
+        self.check(['-X', 'expectations_1.txt', '-X', 'expectations_2.txt', 
+                    '-x', 'foo'], files=files, ret=1)
+
+    def test_expectations_file_has_syntax_error(self):
+        files = {
+            'expectations.txt': d('''\
+                # tags: [ 
+                crbug.com/12345 [ foo ] fail_test.FailingTest.test_fail [ Failure ]
+                '''),
+            'fail_test.py': FAIL_TEST_PY,
+        }
+        self.check(['-X', 'expectations.txt', '-x', 'foo'], files=files, ret=1)
 
     def test_fail(self):
         _, out, _, _ = self.check([], files=FAIL_TEST_FILES, ret=1, err='')
         self.assertIn('fail_test.FailingTest.test_fail failed unexpectedly',
                       out)
+
+    def test_fail_repeat(self):
+        _, out, _, _ = self.check(
+            ['--repeat', '2'], files=FAIL_TEST_FILES, ret=1, err='')
+        self.assertIn(
+            '[1/2] fail_test.FailingTest.test_fail failed unexpectedly', out)
+        self.assertIn(
+            '[2/2] fail_test.FailingTest.test_fail failed unexpectedly', out)
 
     def test_fail_then_pass(self):
         files = {'fail_then_pass_test.py': d("""\
@@ -367,12 +348,62 @@ class TestCli(test_case.MainTestCase):
                                       files=files, ret=0, err='')
         self.assertIn('Retrying failed tests (attempt #1 of 3)', out)
         self.assertNotIn('Retrying failed tests (attempt #2 of 3)', out)
-        self.assertIn('1 test run, 0 failures.\n', out)
+        self.assertIn('1 test passed, 0 skipped, 0 failures.\n', out)
         results = json.loads(files['full_results.json'])
         self.assertEqual(
             results['tests'][
                 'fail_then_pass_test']['FPTest']['test_count']['actual'],
             'FAIL PASS')
+
+    def test_fail_then_pass_repeat(self):
+        files = {'fail_then_pass_test.py': d("""\
+            import unittest
+            count = 0
+            class FPTest(unittest.TestCase):
+                def test_count(self):
+                    global count
+                    count += 1
+                    if count % 2 == 1:
+                        self.fail()
+            """)}
+        _, out, _, files = self.check(['--retry-limit', '3',
+                                       '--write-full-results-to',
+                                       'full_results.json',
+                                       '--repeat', '2'],
+                                      files=files, ret=0, err='')
+        results = json.loads(files['full_results.json'])
+        self.assertIn('Retrying failed tests (attempt #1 of 3)', out)
+        self.assertNotIn('Retrying failed tests (attempt #2 of 3)', out)
+        self.assertEqual(
+            results['tests'][
+                'fail_then_pass_test']['FPTest']['test_count']['actual'],
+            'FAIL PASS FAIL PASS')
+
+    def test_fail_then_skip(self):
+        files = {'fail_then_skip_test.py': d("""\
+            import unittest
+            count = 0
+            class FPTest(unittest.TestCase):
+                def test_count(self):
+                    global count
+                    count += 1
+                    if count == 1:
+                        self.fail()
+                    elif count == 2:
+                        self.skipTest('')
+            """)}
+        _, out, _, files = self.check(['--retry-limit', '3',
+                                       '--write-full-results-to',
+                                       'full_results.json'],
+                                      files=files, ret=0, err='')
+        self.assertIn('Retrying failed tests (attempt #1 of 3)', out)
+        self.assertNotIn('Retrying failed tests (attempt #2 of 3)', out)
+        self.assertIn('0 tests passed, 1 skipped, 0 failures.\n', out)
+        results = json.loads(files['full_results.json'])
+        self.assertEqual(
+            results['tests'][
+                'fail_then_skip_test']['FPTest']['test_count']['actual'],
+            'FAIL SKIP')
 
     def test_failures_are_not_elided(self):
         _, out, _, _ = self.check(['--terminal-width=20'],
@@ -428,12 +459,82 @@ class TestCli(test_case.MainTestCase):
                    files=files, cwd='bar', ret=0, err='',
                    out='pass_test.PassingTest.test_pass\n')
 
+    def test_multiple_top_level_dirs(self):
+        files = {
+            'foo/bar/__init__.py': '',
+            'foo/bar/pass_test.py': PASS_TEST_PY,
+            'baz/quux/__init__.py': '',
+            'baz/quux/second_test.py': PASS_TEST_PY,
+        }
+        self.check(['-l', 'foo/bar', 'baz/quux'], files=files,
+                   ret=0, err='',
+                   out=(
+                       'bar.pass_test.PassingTest.test_pass\n'
+                       'quux.second_test.PassingTest.test_pass\n'
+                       ))
+        self.check(['-l', 'foo/bar/pass_test.py', 'baz/quux'], files=files,
+                   ret=0, err='',
+                   out=(
+                       'bar.pass_test.PassingTest.test_pass\n'
+                       'quux.second_test.PassingTest.test_pass\n'
+                       ))
+        self.check(['-l', '--top-level-dirs', 'foo', '--top-level-dirs', 'baz'],
+                   files=files,
+                   ret=0, err='',
+                   out=(
+                       'bar.pass_test.PassingTest.test_pass\n'
+                       'quux.second_test.PassingTest.test_pass\n'
+                       ))
+
+    def test_list_with_repeat(self):
+        files = {
+            'foo/bar/__init__.py': '',
+            'foo/bar/pass_test.py': PASS_TEST_PY,
+            'baz/quux/__init__.py': '',
+            'baz/quux/second_test.py': PASS_TEST_PY,
+        }
+        self.check(['-l', 'foo/bar', 'baz/quux', '--repeat', '10'],
+                   files=files,
+                   ret=0, err='',
+                   out=(
+                       'bar.pass_test.PassingTest.test_pass\n'
+                       'quux.second_test.PassingTest.test_pass\n'
+                       ))
+
+    def test_single_top_level_dir(self):
+        files = {
+            'foo/bar/__init__.py': '',
+            'foo/bar/pass_test.py': PASS_TEST_PY,
+            'baz/quux/__init__.py': '',
+            'baz/quux/second_test.py': PASS_TEST_PY,
+        }
+        self.check(['-l', '--top-level-dir', 'foo'],
+                   files=files,
+                   ret=0, err='',
+                   out=(
+                       'bar.pass_test.PassingTest.test_pass\n'
+                       ))
+
+    def test_can_not_have_both_top_level_flags(self):
+        files = {
+            'foo/bar/__init__.py': '',
+            'foo/bar/pass_test.py': PASS_TEST_PY,
+            'baz/quux/__init__.py': '',
+            'baz/quux/second_test.py': PASS_TEST_PY,
+        }
+        self.check(
+            ['-l', '--top-level-dir', 'foo', '--top-level-dirs', 'bar'],
+            files=files,
+            ret=1, out='',
+            err='Cannot specify both --top-level-dir and --top-level-dirs\n')
+
     def test_help(self):
         self.check(['--help'], ret=0, rout='.*', err='')
 
     def test_import_failure_missing_file(self):
-        self.check(['-l', 'foo'], ret=1, err='',
-                   rout='Failed to load "foo".*')
+        _, out, _, _ = self.check(['-l', 'foo'], ret=1, err='')
+        self.assertIn('Failed to load "foo" in find_tests', out)
+        self.assertIn('No module named', out)
 
     def test_import_failure_missing_package(self):
         files = {'foo.py': d("""\
@@ -444,14 +545,14 @@ class TestCli(test_case.MainTestCase):
                                 def test_case(self):
                                     pass
                              """)}
-        self.check(['-l', 'foo.py'], files=files, ret=1, err='',
-                   rout=('Failed to load "foo.py": No module named '
-                         '\'?package_that_does_not_exist\'?\n'))
+        _, out, _, _ = self.check(['-l', 'foo.py'], files=files, ret=1, err='')
+        self.assertIn('Failed to load "foo.py" in find_tests', out)
+        self.assertIn('No module named', out)
 
     def test_import_failure_no_tests(self):
         files = {'foo.py': 'import unittest'}
-        self.check(['-l', 'foo.bar'], files=files, ret=1, err='',
-                   rout='Failed to load "foo.bar":.*')
+        self.check(['-l', 'foo'], files=files, ret=0, err='',
+                   out='\n')
 
     def test_import_failure_syntax_error(self):
         files = {'syn_test.py': d("""\
@@ -463,9 +564,7 @@ class TestCli(test_case.MainTestCase):
                              """)}
         _, out, _, _ = self.check([], files=files, ret=1, err='')
         self.assertIn('Failed to import test module: syn_test', out)
-        self.assertIn(('    syntax error\n'
-                       '               ^\n'
-                       'SyntaxError: invalid syntax\n'), out)
+        self.assertIn('SyntaxError: invalid syntax', out)
 
     def test_interrupt(self):
         files = {'interrupt_test.py': d("""\
@@ -480,7 +579,7 @@ class TestCli(test_case.MainTestCase):
     def test_isolate(self):
         self.check(['--isolate', '*test_pass*'], files=PASS_TEST_FILES, ret=0,
                    out=('[1/1] pass_test.PassingTest.test_pass passed\n'
-                        '1 test run, 0 failures.\n'), err='')
+                        '1 test passed, 0 skipped, 0 failures.\n'), err='')
 
     def test_load_tests_failure(self):
         files = {'foo_test.py': d("""\
@@ -489,8 +588,8 @@ class TestCli(test_case.MainTestCase):
                                   def load_tests(_, _2, _3):
                                       raise ValueError('this should fail')
                                   """)}
-        self.check([], files=files, ret=1, err='',
-                   out=('foo_test.load_tests() failed: this should fail\n'))
+        _, out, _, _ = self.check([], files=files, ret=1, err='')
+        self.assertIn('this should fail', out)
 
     def test_load_tests_single_worker(self):
         files = LOAD_TEST_FILES
@@ -498,7 +597,7 @@ class TestCli(test_case.MainTestCase):
                                   err='')
         self.assertIn('[1/2] load_test.BaseTest.test_fail failed', out)
         self.assertIn('[2/2] load_test.BaseTest.test_pass passed', out)
-        self.assertIn('2 tests run, 1 failure.\n', out)
+        self.assertIn('1 test passed, 0 skipped, 1 failure.\n', out)
 
     def test_load_tests_multiple_workers(self):
         _, out, _, _ = self.check([], files=LOAD_TEST_FILES, ret=1, err='')
@@ -508,7 +607,7 @@ class TestCli(test_case.MainTestCase):
         # we care about are present.
         self.assertIn('test_pass passed', out)
         self.assertIn('test_fail failed', out)
-        self.assertIn('2 tests run, 1 failure.\n', out)
+        self.assertIn('1 test passed, 0 skipped, 1 failure.\n', out)
 
     def test_missing_builder_name(self):
         self.check(['--test-results-server', 'localhost'], ret=2,
@@ -524,7 +623,7 @@ class TestCli(test_case.MainTestCase):
                    files=OUTPUT_TEST_FILES, aenv={'NINJA_STATUS': 'ns: '},
                    out=d("""\
                          ns: output_test.PassTest.test_out passed
-                         1 test run, 0 failures.
+                         1 test passed, 0 skipped, 0 failures.
                          """), err='')
 
     def test_output_for_failures(self):
@@ -549,15 +648,16 @@ class TestCli(test_case.MainTestCase):
                          3)
 
     def test_skip(self):
-        self.check(['--skip', '*test_fail*'], files=FAIL_TEST_FILES, ret=1,
-                   out='No tests to run.\n', err='')
+        _, out, _, _ = self.check(['--skip', '*test_fail*'],
+                                  files=FAIL_TEST_FILES, ret=0)
+        self.assertIn('0 tests passed, 1 skipped, 0 failures.', out)
 
         files = {'fail_test.py': FAIL_TEST_PY,
                  'pass_test.py': PASS_TEST_PY}
         self.check(['-j', '1', '--skip', '*test_fail*'], files=files, ret=0,
                    out=('[1/2] fail_test.FailingTest.test_fail was skipped\n'
                         '[2/2] pass_test.PassingTest.test_pass passed\n'
-                        '2 tests run, 0 failures.\n'), err='')
+                        '1 test passed, 1 skipped, 0 failures.\n'), err='')
 
         # This tests that we print test_started updates for skipped tests
         # properly. It also tests how overwriting works.
@@ -578,7 +678,13 @@ class TestCli(test_case.MainTestCase):
              '                                     \r'
              '[2/2] pass_test.PassingTest.test_pass passed\r'
              '                                            \r'
-             '2 tests run, 0 failures.'))
+             '1 test passed, 1 skipped, 0 failures.'))
+
+    def test_skip_via_expectations(self):
+        files = {'expectations.txt': 'crbug.com/23456 fail_test.FailingTest.test_fail [ Skip ]\n',
+                 'fail_test.py': FAIL_TEST_PY,
+                 'pass_test.py': PASS_TEST_PY}
+        self.check(['-X', 'expectations.txt'], files=files, ret=0)
 
     def test_skips_and_failures(self):
         _, out, _, _ = self.check(['-j', '1', '-v', '-v'], files=SF_TEST_FILES,
@@ -586,7 +692,7 @@ class TestCli(test_case.MainTestCase):
 
         # We do a bunch of assertIn()'s to work around the non-portable
         # tracebacks.
-        self.assertIn(('[1/9] sf_test.ExpectedFailures.test_fail failed:\n'
+        self.assertIn(('[1/9] sf_test.ExpectedFailures.test_fail failed as expected:\n'
                        '  Traceback '), out)
         self.assertIn(('[2/9] sf_test.ExpectedFailures.test_pass '
                        'passed unexpectedly'), out)
@@ -608,16 +714,17 @@ class TestCli(test_case.MainTestCase):
                        '  reason\n'
                        '[9/9] sf_test.SkipSetup.test_notrun was skipped:\n'
                        '  setup failed\n'
-                       '9 tests run, 4 failures.\n'), out)
+                       '1 test passed, 4 skipped, 4 failures.\n'), out)
 
     def test_skip_and_all(self):
         # --all should override --skip
-        self.check(['-l', '--skip', '*test_pass'],
-                   files=PASS_TEST_FILES, ret=1, err='',
-                   out='No tests to run.\n')
-        self.check(['-l', '--all', '--skip', '*test_pass'],
-                   files=PASS_TEST_FILES, ret=0, err='',
-                   out='pass_test.PassingTest.test_pass\n')
+        _, out, _, _ = self.check(['--skip', '*test_pass'],
+                                  files=PASS_TEST_FILES, ret=0, err='')
+        self.assertIn('0 tests passed, 1 skipped, 0 failures.', out)
+
+        _, out, _, _ = self.check(['--all', '--skip', '*test_pass'],
+                                  files=PASS_TEST_FILES, ret=0, err='')
+        self.assertIn('1 test passed, 0 skipped, 0 failures.', out)
 
     def test_skip_decorators_and_all(self):
         _, out, _, _ = self.check(['--all', '-j', '1', '-v', '-v'],
@@ -632,17 +739,46 @@ class TestCli(test_case.MainTestCase):
         self.assertIn('sf_test.SkipSetup.test_notrun was skipped', out)
 
     def test_sharding(self):
-      # Test no sharding.
-      self.run_and_check_test_results(1)
 
-      # A typical with 4 shards.
-      self.run_and_check_test_results(4)
+        def run(shard_index, total_shards, tests):
+            files = {'shard_test.py': textwrap.dedent(
+                """\
+                import unittest
+                class ShardTest(unittest.TestCase):
+                    def test_01(self):
+                        pass
 
-      # Case which number of shards is a prime.
-      self.run_and_check_test_results(7)
+                    def test_02(self):
+                        pass
 
-      # Case which number of shards is more than number of tests.
-      self.run_and_check_test_results(50)
+                    def test_03(self):
+                        pass
+
+                    def test_04(self):
+                        pass
+
+                    def test_05(self):
+                        pass
+                """)}
+            _, out, _, _ = self.check(
+                ['--shard-index', str(shard_index),
+                 '--total-shards', str(total_shards),
+                 '--jobs', '1'],
+                files=files)
+
+            exp_out = ''
+            total_tests = len(tests)
+            for i, test in enumerate(tests):
+                exp_out += ('[%d/%d] shard_test.ShardTest.test_%s passed\n' %
+                            (i + 1, total_tests, test))
+            exp_out += '%d test%s passed, 0 skipped, 0 failures.\n' % (
+                total_tests, "" if total_tests == 1 else "s")
+            self.assertEqual(out, exp_out)
+
+        run(0, 1, ['01', '02', '03', '04', '05'])
+        run(0, 2, ['01', '03', '05'])
+        run(1, 2, ['02', '04'])
+        run(0, 6, ['01'])
 
     def test_subdir(self):
         files = {
@@ -653,14 +789,14 @@ class TestCli(test_case.MainTestCase):
         self.check(['foo/bar'], files=files, ret=0, err='',
                    out=d("""\
                          [1/1] foo.bar.pass_test.PassingTest.test_pass passed
-                         1 test run, 0 failures.
+                         1 test passed, 0 skipped, 0 failures.
                          """))
 
     def test_timing(self):
         self.check(['-t'], files=PASS_TEST_FILES, ret=0, err='',
                    rout=(r'\[1/1\] pass_test.PassingTest.test_pass passed '
                          r'\d+.\d+s\n'
-                         r'1 test run in \d+.\d+s, 0 failures.'))
+                         r'1 test passed in \d+.\d+s, 0 skipped, 0 failures.'))
 
     def test_test_results_server(self):
         server = test_result_server_fake.start()
@@ -668,21 +804,21 @@ class TestCli(test_case.MainTestCase):
 
         try:
             self.check(['--test-results-server',
-                        '%s:%d' % server.server_address,
+                        'http://%s:%d' % server.server_address,
                         '--master-name', 'fake_master',
                         '--builder-name', 'fake_builder',
                         '--test-type', 'typ_tests',
                         '--metadata', 'foo=bar'],
                        files=PASS_TEST_FILES, ret=0, err='',
                        out=('[1/1] pass_test.PassingTest.test_pass passed\n'
-                            '1 test run, 0 failures.\n'))
+                            '1 test passed, 0 skipped, 0 failures.\n'))
 
         finally:
             posts = server.stop()
 
         self.assertEqual(len(posts), 1)
         payload = posts[0][2].decode('utf8')
-        self.assertIn('"test_pass": {"expected": "PASS", "actual": "PASS"}',
+        self.assertIn('"test_pass": {"expected": "PASS", "actual": "PASS"',
                       payload)
         self.assertTrue(payload.endswith('--\r\n'))
         self.assertNotEqual(server.log.getvalue(), '')
@@ -693,14 +829,14 @@ class TestCli(test_case.MainTestCase):
 
         try:
             self.check(['--test-results-server',
-                        '%s:%d' % server.server_address,
+                        'http://%s:%d' % server.server_address,
                         '--master-name', 'fake_master',
                         '--builder-name', 'fake_builder',
                         '--test-type', 'typ_tests',
                         '--metadata', 'foo=bar'],
                        files=PASS_TEST_FILES, ret=1, err='',
                        out=('[1/1] pass_test.PassingTest.test_pass passed\n'
-                            '1 test run, 0 failures.\n'
+                            '1 test passed, 0 skipped, 0 failures.\n'
                             'Uploading the JSON results raised '
                             '"HTTP Error 500: Internal Server Error"\n'))
 
@@ -708,15 +844,27 @@ class TestCli(test_case.MainTestCase):
             _ = server.stop()
 
     def test_test_results_server_not_running(self):
-        self.check(['--test-results-server', 'localhost:99999',
+        self.check(['--test-results-server', 'http://localhost:99999',
                     '--master-name', 'fake_master',
                     '--builder-name', 'fake_builder',
                     '--test-type', 'typ_tests',
                     '--metadata', 'foo=bar'],
                    files=PASS_TEST_FILES, ret=1, err='',
                    rout=(r'\[1/1\] pass_test.PassingTest.test_pass passed\n'
-                         '1 test run, 0 failures.\n'
+                         '1 test passed, 0 skipped, 0 failures.\n'
                          'Uploading the JSON results raised .*\n'))
+
+    def test_unexpected_skip(self):
+        files = {
+            'expectations.txt':
+                'crbug.com/23456 skip_test.SkipSetup.test_notrun [ Pass ]\n',
+            'skip_test.py': SF_TEST_PY
+        }
+        _, out, _, _ = self.check(['-X', 'expectations.txt', 
+                                   'skip_test.SkipSetup.test_notrun'],
+                                   files=files, ret=1, err='')
+        self.assertIn('skip_test.SkipSetup.test_notrun was skipped unexpectedly',
+                      out)
 
     def test_verbose_2(self):
         self.check(['-vv', '-j', '1', 'output_test.PassTest'],
@@ -726,7 +874,7 @@ class TestCli(test_case.MainTestCase):
                            hello on stderr
                          [2/2] output_test.PassTest.test_out passed:
                            hello on stdout
-                         2 tests run, 0 failures.
+                         2 tests passed, 0 skipped, 0 failures.
                          """), err='')
 
     def test_verbose_3(self):
@@ -739,7 +887,7 @@ class TestCli(test_case.MainTestCase):
                          [1/2] output_test.PassTest.test_out queued
                          [2/2] output_test.PassTest.test_out passed:
                            hello on stdout
-                         2 tests run, 0 failures.
+                         2 tests passed, 0 skipped, 0 failures.
                          """), err='')
 
     def test_version(self):
@@ -752,15 +900,23 @@ class TestCli(test_case.MainTestCase):
         results = json.loads(files['results.json'])
         self.assertEqual(results['interrupted'], False)
         self.assertEqual(results['path_delimiter'], '.')
-        self.assertEqual(results['tests'],
-                         {u'pass_test': {
+
+        # The time it takes to run the test varies, so we test that
+        # we got a single entry greater than zero, but then delete it from
+        # the result so we can do an exact match on the rest of the trie.
+        result = results['tests']['pass_test']['PassingTest']['test_pass']
+        self.assertEqual(len(result['times']), 1)
+        self.assertGreater(result['times'][0], 0)
+        result.pop('times')
+        self.assertEqual({u'pass_test': {
                              u'PassingTest': {
                                  u'test_pass': {
                                      u'actual': u'PASS',
                                      u'expected': u'PASS',
                                  }
                              }
-                         }})
+                         }},
+                         results['tests'])
 
     def test_write_trace_to(self):
         _, _, _, files = self.check(['--write-trace-to', 'trace.json'],
@@ -773,8 +929,8 @@ class TestCli(test_case.MainTestCase):
         self.assertEqual(event['name'], 'pass_test.PassingTest.test_pass')
         self.assertEqual(event['ph'], 'X')
         self.assertEqual(event['tid'], 1)
-        self.assertEqual(event['args']['expected'], ['Pass'])
-        self.assertEqual(event['args']['actual'], 'Pass')
+        self.assertEqual(event['args']['expected'], ['PASS'])
+        self.assertEqual(event['args']['actual'], 'PASS')
 
 
 class TestMain(TestCli):

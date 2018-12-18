@@ -95,7 +95,7 @@ def AddHistograms(histogram_jsons):
       buckets[key] += b['count']
 
   buckets = [{'low': key[0], 'high': key[1], 'count': value}
-      for key, value in buckets.iteritems()]
+             for key, value in buckets.iteritems()]
   buckets.sort(key=lambda h: h['low'])
 
   result_histogram = {}
@@ -111,8 +111,8 @@ def GetHistogram(histogram_type, histogram_name, tab):
     function = 'getBrowserHistogram'
   try:
     histogram_json = tab.EvaluateJavaScript(
-        'statsCollectionController.%s("%s")' %
-        (function, histogram_name))
+        'statsCollectionController.{{ @f }}({{ name }})',
+        f=function, name=histogram_name)
   except exceptions.EvaluateException:
     # Sometimes JavaScript flakily fails to execute: http://crbug.com/508431
     histogram_json = None

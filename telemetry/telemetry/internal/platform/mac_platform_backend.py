@@ -12,22 +12,18 @@ import time
 from telemetry.core import os_version as os_version_module
 from telemetry import decorators
 from telemetry.internal.platform import posix_platform_backend
-from telemetry.internal.platform.power_monitor import powermetrics_power_monitor
 from telemetry.util import process_statistic_timeline_data
-
-try:
-  import resource  # pylint: disable=import-error
-except ImportError:
-  resource = None  # Not available on all platforms
-
 
 
 class MacPlatformBackend(posix_platform_backend.PosixPlatformBackend):
   def __init__(self):
     super(MacPlatformBackend, self).__init__()
     self.libproc = None
-    self._power_monitor = powermetrics_power_monitor.PowerMetricsPowerMonitor(
-        self)
+
+  def GetSystemLog(self):
+    # Since the log file can be very large, only show the last 200 lines.
+    return subprocess.check_output(
+        ['tail', '-n', '200', '/var/log/system.log'])
 
   @classmethod
   def IsPlatformBackendForHost(cls):
@@ -48,8 +44,8 @@ class MacPlatformBackend(posix_platform_backend.PosixPlatformBackend):
       return process_statistic_timeline_data.IdleWakeupTimelineData(pid, 0)
     # Numbers reported by top may have a '+' appended.
     wakeup_count = int(top_output[-1].strip('+ '))
-    return process_statistic_timeline_data.IdleWakeupTimelineData(pid,
-        wakeup_count)
+    return process_statistic_timeline_data.IdleWakeupTimelineData(
+        pid, wakeup_count)
 
   def GetCpuStats(self, pid):
     """Returns a dict of cpu statistics for the process represented by |pid|."""
@@ -99,34 +95,9 @@ class MacPlatformBackend(posix_platform_backend.PosixPlatformBackend):
     """Return current timestamp in seconds."""
     return {'TotalTime': time.time()}
 
-  def GetSystemCommitCharge(self):
-    vm_stat = self.RunCommand(['vm_stat'])
-    for stat in vm_stat.splitlines():
-      key, value = stat.split(':')
-      if key == 'Pages active':
-        pages_active = int(value.strip()[:-1])  # Strip trailing '.'
-        return pages_active * resource.getpagesize() / 1024
-    return 0
-
   @decorators.Cache
   def GetSystemTotalPhysicalMemory(self):
     return int(self.RunCommand(['sysctl', '-n', 'hw.memsize']))
-
-  def PurgeUnpinnedMemory(self):
-    # TODO(pliard): Implement this.
-    pass
-
-  @decorators.Deprecated(
-      2017, 11, 4,
-      'Clients should use tracing and memory-infra in new Telemetry '
-      'benchmarks. See for context: https://crbug.com/632021')
-  def GetMemoryStats(self, pid):
-    rss_vsz = self.GetPsOutput(['rss', 'vsz'], pid)
-    if rss_vsz:
-      rss, vsz = rss_vsz[0].split()
-      return {'VM': 1024 * int(vsz),
-              'WorkingSetSize': 1024 * int(rss)}
-    return {}
 
   @decorators.Cache
   def GetArchName(self):
@@ -153,8 +124,20 @@ class MacPlatformBackend(posix_platform_backend.PosixPlatformBackend):
       return os_version_module.YOSEMITE
     if os_version.startswith('15.'):
       return os_version_module.ELCAPITAN
+    if os_version.startswith('16.'):
+      return os_version_module.SIERRA
+    if os_version.startswith('17.'):
+      return os_version_module.HIGHSIERRA
+    if os_version.startswith('18.'):
+      return os_version_module.MOJAVE
 
     raise NotImplementedError('Unknown mac version %s.' % os_version)
+
+  @decorators.Cache
+  def GetOSVersionDetailString(self):
+    product = subprocess.check_output(['sw_vers', '-productVersion']).strip()
+    build = subprocess.check_output(['sw_vers', '-buildVersion']).strip()
+    return product + ' ' + build
 
   def CanTakeScreenshot(self):
     return True
@@ -175,13 +158,7 @@ class MacPlatformBackend(posix_platform_backend.PosixPlatformBackend):
     assert p.returncode == 0, 'Failed to flush system cache'
 
   def CanMonitorPower(self):
-    return self._power_monitor.CanMonitorPower()
+    return False
 
   def CanMeasurePerApplicationPower(self):
-    return self._power_monitor.CanMeasurePerApplicationPower()
-
-  def StartMonitoringPower(self, browser):
-    self._power_monitor.StartMonitoringPower(browser)
-
-  def StopMonitoringPower(self):
-    return self._power_monitor.StopMonitoringPower()
+    return False

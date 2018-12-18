@@ -16,15 +16,20 @@ class ProjectConfig(object):
     default_chrome_root: A path to chromium source directory. Many telemetry
       features depend on chromium source tree's presence and those won't work
       in case this is not specified.
+    expectations_file: A path to expectations file.
   """
   def __init__(self, top_level_dir, benchmark_dirs=None,
                benchmark_aliases=None, client_configs=None,
-               default_chrome_root=None):
+               default_chrome_root=None, expectations_file=None,
+               expectations_files=None):
+    if expectations_file:
+      expectations_files = [expectations_file]
     self._top_level_dir = top_level_dir
     self._benchmark_dirs = benchmark_dirs or []
     self._benchmark_aliases = benchmark_aliases or dict()
     self._client_configs = client_configs or []
     self._default_chrome_root = default_chrome_root
+    self._expectations_files = expectations_files or []
 
   @property
   def top_level_dir(self):
@@ -49,3 +54,7 @@ class ProjectConfig(object):
   @property
   def default_chrome_root(self):
     return self._default_chrome_root
+
+  @property
+  def expectations_files(self):
+    return self._expectations_files

@@ -2,10 +2,11 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import mock
 import tempfile
 import unittest
 import os
+
+import mock
 
 from py_utils import cloud_storage  # pylint: disable=import-error
 from telemetry.testing import fakes
@@ -31,9 +32,10 @@ class ScreenshotUtilTests(unittest.TestCase):
     screenshot_file_path = fh.GetAbsPath()
     try:
       actual_screenshot_img = image_util.FromPngFile(screenshot_file_path)
-      self.assertTrue(image_util.AreEqual(
-                      image_util.FromBase64Png(expected_png_base64),
-                      actual_screenshot_img))
+      self.assertTrue(
+          image_util.AreEqual(
+              image_util.FromBase64Png(expected_png_base64),
+              actual_screenshot_img))
     finally:  # Must clean up screenshot file if exists.
       os.remove(screenshot_file_path)
 
@@ -45,8 +47,9 @@ class ScreenshotUtilTests(unittest.TestCase):
     local_path = '123456abcdefg.png'
 
     with mock.patch('py_utils.cloud_storage.Insert') as mock_insert:
-      with mock.patch('telemetry.util.screenshot._GenerateRemotePath',
-        return_value=local_path):
+      with mock.patch(
+          'telemetry.util.screenshot._GenerateRemotePath',
+          return_value=local_path):
 
         url = screenshot._UploadScreenShotToCloudStorage(fh1)
         mock_insert.assert_called_with(

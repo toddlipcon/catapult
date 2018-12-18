@@ -22,20 +22,18 @@ class _StoryMatcher(object):
     return self._regex is not None
 
   def HasMatch(self, story):
-    return self and bool(
-        self._regex.search(story.display_name) or
-        (story.name and self._regex.search(story.name)))
+    return self and bool(self._regex.search(story.name))
 
 
-class _StoryLabelMatcher(object):
-  def __init__(self, labels_str):
-    self._labels = labels_str.split(',') if labels_str else None
+class _StoryTagMatcher(object):
+  def __init__(self, tags_str):
+    self._tags = tags_str.split(',') if tags_str else None
 
   def __nonzero__(self):
-    return self._labels is not None
+    return self._tags is not None
 
   def HasLabelIn(self, story):
-    return self and bool(story.labels.intersection(self._labels))
+    return self and bool(story.tags.intersection(self._tags))
 
 
 class StoryFilter(command_line.ArgumentHandlerMixIn):
@@ -44,22 +42,54 @@ class StoryFilter(command_line.ArgumentHandlerMixIn):
   @classmethod
   def AddCommandLineArgs(cls, parser):
     group = optparse.OptionGroup(parser, 'User story filtering options')
-    group.add_option('--story-filter',
+    group.add_option(
+        '--story-filter',
         help='Use only stories whose names match the given filter regexp.')
-    group.add_option('--story-filter-exclude',
+    group.add_option(
+        '--story-filter-exclude',
         help='Exclude stories whose names match the given filter regexp.')
-    group.add_option('--story-label-filter',
-        help='Use only stories that have any of these labels')
-    group.add_option('--story-label-filter-exclude',
-        help='Exclude stories that have any of these labels')
+    group.add_option(
+        '--story-tag-filter',
+        help='Use only stories that have any of these tags')
+    group.add_option(
+        '--story-tag-filter-exclude',
+        help='Exclude stories that have any of these tags')
+    common_story_shard_help = (
+        'Indices start at 0, and have the same rules as python slices,'
+        ' e.g.  [4, 5, 6, 7, 8][0:3] -> [4, 5, 6])')
+    group.add_option(
+        '--story-shard-begin-index', type='int', dest='story_shard_begin_index',
+        help=('Beginning index of set of stories to run. If this is ommited, '
+              'the starting index will be from the first story in the benchmark'
+              + common_story_shard_help))
+    group.add_option(
+        '--story-shard-end-index', type='int', dest='story_shard_end_index',
+        help=('End index of set of stories to run. Value will be '
+              'rounded down to the number of stories. Negative values not'
+              'allowed. If this is ommited, the end index is the final story'
+              'of the benchmark. '+ common_story_shard_help))
+
     parser.add_option_group(group)
 
   @classmethod
   def ProcessCommandLineArgs(cls, parser, args):
     cls._include_regex = _StoryMatcher(args.story_filter)
     cls._exclude_regex = _StoryMatcher(args.story_filter_exclude)
-    cls._include_labels = _StoryLabelMatcher(args.story_label_filter)
-    cls._exclude_labels = _StoryLabelMatcher(args.story_label_filter_exclude)
+
+    cls._include_tags = _StoryTagMatcher(args.story_tag_filter)
+    cls._exclude_tags = _StoryTagMatcher(args.story_tag_filter_exclude)
+
+    cls._begin_index = args.story_shard_begin_index or 0
+    cls._end_index = args.story_shard_end_index
+
+    if cls._end_index is not None:
+      if cls._end_index < 0:
+        raise parser.error(
+            '--story-shard-end-index cannot be less than 0')
+      if cls._begin_index is not None and cls._end_index <= cls._begin_index:
+        raise parser.error(
+            '--story-shard-end-index cannot be less than'
+            ' or equal to --experimental-story-shard-begin-index')
 
     if cls._include_regex.has_compile_error:
       raise parser.error('--story-filter: Invalid regex.')
@@ -67,15 +97,31 @@ class StoryFilter(command_line.ArgumentHandlerMixIn):
       raise parser.error('--story-filter-exclude: Invalid regex.')
 
   @classmethod
-  def IsSelected(cls, story):
-    # Exclude filters take priority.
-    if cls._exclude_labels.HasLabelIn(story):
-      return False
-    if cls._exclude_regex.HasMatch(story):
-      return False
+  def FilterStorySet(cls, story_set):
+    """Filters the given story set, using filters provided in the command line.
 
-    if cls._include_labels and not cls._include_labels.HasLabelIn(story):
-      return False
-    if cls._include_regex and not cls._include_regex.HasMatch(story):
-      return False
-    return True
+    Story sharding is done before exclusion and inclusion is done.
+    """
+    if cls._begin_index < 0:
+      cls._begin_index = 0
+    if cls._end_index is None:
+      cls._end_index = len(story_set)
+
+    story_set = story_set[cls._begin_index:cls._end_index]
+
+    final_story_set = []
+    for story in story_set:
+      # Exclude filters take priority.
+      if cls._exclude_tags.HasLabelIn(story):
+        continue
+      if cls._exclude_regex.HasMatch(story):
+        continue
+
+      if cls._include_tags and not cls._include_tags.HasLabelIn(story):
+        continue
+      if cls._include_regex and not cls._include_regex.HasMatch(story):
+        continue
+
+      final_story_set.append(story)
+
+    return final_story_set
