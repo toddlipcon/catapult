@@ -261,7 +261,7 @@ tr.exportTo('tr.ui.tracks', function() {
       const canvasBounds = ctx.canvas.getBoundingClientRect();
 
       ctx.save();
-      ctx.translate(0, pixelRatio * (bounds.top - canvasBounds.top));
+      //ctx.translate(0, pixelRatio * (bounds.top - canvasBounds.top));
 
       const dt = this.viewport.currentDisplayTransform;
       const viewLWorld = dt.xViewToWorld(0);
